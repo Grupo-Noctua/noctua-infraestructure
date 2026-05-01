@@ -1,0 +1,445 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Compute layer (EC2 + Lambdas + Glue + Athena/Glue Catalog for Grafana) + S3 notifications via Custom Resource (LabRole)
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: noctua-key
+    Description: Nome da Key Pair para acesso SSH nas instâncias EC2
+
+Resources:
+
+  ############################################################
+  # Athena
+  ############################################################
+
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "noctua-athena-results-${AWS::AccountId}-${AWS::Region}"
+
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: noctua-athena-wg
+      Description: WorkGroup para consultas do Grafana no dataset Gold
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${AthenaResultsBucket}/results/"
+
+  ############################################################
+  # Glue Catalog / Crawlers
+  ############################################################
+
+  GlueDatabaseNoctua:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: noctua_analytics
+        Description: Database para tabelas do pipeline (Athena/Grafana)
+
+  GlueCrawlerGold:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: noctua-gold-crawler-poc
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      DatabaseName: !Ref GlueDatabaseNoctua
+      Targets:
+        S3Targets:
+          - Path: !Sub
+              - "s3://${Bucket}/gold/"
+              - Bucket: !ImportValue GoldBucketName
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: DEPRECATE_IN_DATABASE
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_EVERYTHING
+
+  GlueCrawlerSilver:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: noctua-silver-crawler
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      DatabaseName: !Ref GlueDatabaseNoctua
+      Description: Crawler para catalogar dados do bucket Silver para Athena/Grafana
+      Targets:
+        S3Targets:
+          - Path: !Sub
+              - "s3://${Bucket}/silver/"
+              - Bucket: !ImportValue SilverBucketName
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: DEPRECATE_IN_DATABASE
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_EVERYTHING
+
+  ############################################################
+  # Glue Triggers (Schedules)
+  ############################################################
+
+  GlueCrawlerSilverTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: noctua-silver-crawler-trigger
+      Type: SCHEDULED
+      # a cada 15 minutos
+      Schedule: cron(0/15 * * * ? *)
+      Actions:
+        - CrawlerName: !Ref GlueCrawlerSilver
+      StartOnCreation: true
+
+  GlueCrawlerGoldTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: noctua-gold-crawler-trigger
+      Type: SCHEDULED
+      # a cada 15 minutos
+      Schedule: cron(0/15 * * * ? *)
+      Actions:
+        - CrawlerName: !Ref GlueCrawlerGold
+      StartOnCreation: true        
+
+  ############################################################
+  # EC2
+  ############################################################
+
+  EC2Grafana:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref KeyPairName
+      ImageId: !Sub "{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}"
+      SubnetId: !ImportValue PUBLIC-SUBNET
+      SecurityGroupIds:
+        - !ImportValue SG-ID
+      IamInstanceProfile: LabInstanceProfile
+      Tags:
+        - Key: Name
+          Value: ec2-grafana
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          apt update -y
+          apt install -y docker.io
+          systemctl start docker
+          systemctl enable docker
+          docker run -d -p 3000:3000 --name grafana grafana/grafana:12.4.3
+
+  EC2N8N:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref KeyPairName
+      ImageId: !Sub "{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}"
+      SubnetId: !ImportValue PRIVATE-BACKEND
+      SecurityGroupIds:
+        - !ImportValue SG-ID
+      IamInstanceProfile: LabInstanceProfile
+      Tags:
+        - Key: Name
+          Value: ec2-n8n
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          apt update -y
+          apt install -y docker.io
+          systemctl start docker
+          systemctl enable docker
+          docker run -d -p 5678:5678 --name n8n n8nio/n8n
+
+  ############################################################
+  # Lambdas (processamento)
+  ############################################################
+
+  DataProcessingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: data-processing-lambda
+      Runtime: python3.10
+      Handler: index.lambda_handler
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        ZipFile: !Sub
+          - |
+            import boto3
+            glue = boto3.client("glue")
+
+            BRONZE_BUCKET = "${BronzeBucket}"
+            SILVER_BUCKET = "${SilverBucket}"
+
+            def lambda_handler(event, context):
+                record = event["Records"][0]
+                bucket = record["s3"]["bucket"]["name"]
+                key = record["s3"]["object"]["key"]
+
+                if bucket != BRONZE_BUCKET:
+                    return {"status": "ignored", "reason": "not bronze bucket"}
+
+                if not key.startswith("external/") or not key.lower().endswith(".csv"):
+                    return {"status": "ignored", "reason": "not external csv"}
+
+                runs = glue.get_job_runs(JobName="glue-silver-job", MaxResults=1)
+                if runs.get("JobRuns") and runs["JobRuns"][0]["JobRunState"] in ["RUNNING", "STARTING", "STOPPING"]:
+                    return {"status": "silver already running"}
+
+                input_path = f"s3://{bucket}/{key}"
+                output_path = f"s3://{SILVER_BUCKET}/silver/"
+
+                glue.start_job_run(
+                    JobName="glue-silver-job",
+                    Arguments={"--input_path": input_path, "--output_path": output_path}
+                )
+
+                return {"status": "glue silver started", "input_path": input_path, "output_path": output_path}
+          - BronzeBucket: !ImportValue BronzeBucketName
+            SilverBucket: !ImportValue SilverBucketName
+
+  GoldLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: lambda-silver-to-gold
+      Runtime: python3.10
+      Handler: index.lambda_handler
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        ZipFile: !Sub
+          - |
+            import boto3
+            glue = boto3.client("glue")
+
+            SILVER_BUCKET = "${SilverBucket}"
+            GOLD_BUCKET = "${GoldBucket}"
+
+            def lambda_handler(event, context):
+                record = event["Records"][0]
+                bucket = record["s3"]["bucket"]["name"]
+                key = record["s3"]["object"]["key"]
+
+                if bucket != SILVER_BUCKET:
+                    return {"status": "ignored", "reason": "not silver bucket"}
+
+                if not key.startswith("silver/"):
+                    return {"status": "ignored", "reason": "not silver prefix"}
+
+                runs = glue.get_job_runs(JobName="glue-gold-job", MaxResults=1)
+                if runs.get("JobRuns") and runs["JobRuns"][0]["JobRunState"] in ["RUNNING", "STARTING", "STOPPING"]:
+                    return {"status": "already running"}
+
+                input_path = f"s3://{bucket}/{key}"
+                output_path = f"s3://{GOLD_BUCKET}/gold/"
+
+                glue.start_job_run(
+                    JobName="glue-gold-job",
+                    Arguments={"--input_path": input_path, "--output_path": output_path}
+                )
+
+                return {"status": "started gold", "input_path": input_path, "output_path": output_path}
+          - SilverBucket: !ImportValue SilverBucketName
+            GoldBucket: !ImportValue GoldBucketName
+
+  ############################################################
+  # Glue Jobs
+  ############################################################
+
+  GlueJobSilver:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: glue-silver-job
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub
+          - "s3://${Bucket}/scripts/silver.py"
+          - Bucket: !ImportValue BronzeBucketName
+        PythonVersion: 3
+      GlueVersion: "3.0"
+      MaxCapacity: 2
+      DefaultArguments:
+        "--job-language": "python"
+        "--enable-continuous-cloudwatch-log": "true"
+
+  GlueJobGold:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: glue-gold-job
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub
+          - "s3://${Bucket}/scripts/gold.py"
+          - Bucket: !ImportValue BronzeBucketName
+        PythonVersion: 3
+      GlueVersion: "3.0"
+      MaxCapacity: 2
+      DefaultArguments:
+        "--job-language": "python"
+        "--enable-continuous-cloudwatch-log": "true"
+
+  ############################################################
+  # Permissions: allow S3 to invoke the processing Lambdas
+  ############################################################
+
+  BronzeInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt DataProcessingLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:s3:::${Bucket}"
+        - Bucket: !ImportValue BronzeBucketName
+
+  SilverInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt GoldLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:s3:::${Bucket}"
+        - Bucket: !ImportValue SilverBucketName
+
+  ############################################################
+  # Custom Resource: configure bucket notifications (LabRole)
+  ############################################################
+
+  S3NotificationConfigurator:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "noctua-s3-notification-configurator-${AWS::StackName}"
+      Runtime: python3.10
+      Handler: index.handler
+      Timeout: 60
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import urllib3
+
+          s3 = boto3.client("s3")
+          http = urllib3.PoolManager()
+
+          def send(event, context, status, data=None, physical_resource_id=None, reason=None):
+              response_url = event["ResponseURL"]
+              body = {
+                  "Status": status,
+                  "Reason": reason or ("See CloudWatch Logs: " + context.log_stream_name),
+                  "PhysicalResourceId": physical_resource_id or context.log_stream_name,
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "NoEcho": False,
+                  "Data": data or {},
+              }
+              encoded = json.dumps(body).encode("utf-8")
+              headers = {"content-type": "", "content-length": str(len(encoded))}
+              http.request("PUT", response_url, body=encoded, headers=headers)
+
+          def handler(event, context):
+              try:
+                  req_type = event["RequestType"]
+                  props = event.get("ResourceProperties", {})
+                  bucket = props["BucketName"]
+
+                  if req_type == "Delete":
+                      # Safe behavior: do not wipe bucket notifications on delete
+                      send(event, context, "SUCCESS", {"Message": "No changes on delete"}, physical_resource_id=bucket)
+                      return
+
+                  lambda_arn = props["LambdaArn"]
+                  events = props.get("Events", ["s3:ObjectCreated:*"])
+                  prefix = props.get("Prefix", "")
+                  suffix = props.get("Suffix")
+
+                  rules = []
+                  if prefix:
+                      rules.append({"Name": "prefix", "Value": prefix})
+                  if suffix:
+                      rules.append({"Name": "suffix", "Value": suffix})
+
+                  conf = {"LambdaFunctionConfigurations": []}
+                  entry = {"LambdaFunctionArn": lambda_arn, "Events": events}
+                  if rules:
+                      entry["Filter"] = {"Key": {"FilterRules": rules}}
+                  conf["LambdaFunctionConfigurations"].append(entry)
+
+                  # WARNING: this overwrites existing notification configuration
+                  s3.put_bucket_notification_configuration(
+                      Bucket=bucket,
+                      NotificationConfiguration=conf
+                  )
+
+                  send(event, context, "SUCCESS", {"Bucket": bucket, "LambdaArn": lambda_arn}, physical_resource_id=bucket)
+              except Exception as e:
+                  send(event, context, "FAILED", reason=str(e))
+
+  BronzeBucketNotification:
+    Type: Custom::S3BucketNotification
+    DependsOn:
+      - BronzeInvokePermission
+    Properties:
+      ServiceToken: !GetAtt S3NotificationConfigurator.Arn
+      BucketName: !ImportValue BronzeBucketName
+      LambdaArn: !GetAtt DataProcessingLambda.Arn
+      Events:
+        - s3:ObjectCreated:*
+      Prefix: external/
+
+  SilverBucketNotification:
+    Type: Custom::S3BucketNotification
+    DependsOn:
+      - SilverInvokePermission
+    Properties:
+      ServiceToken: !GetAtt S3NotificationConfigurator.Arn
+      BucketName: !ImportValue SilverBucketName
+      LambdaArn: !GetAtt GoldLambda.Arn
+      Events:
+        - s3:ObjectCreated:*
+      Prefix: silver/
+
+Outputs:
+  DataProcessingLambdaArn:
+    Value: !GetAtt DataProcessingLambda.Arn
+    Export:
+      Name: DataProcessingLambdaArn
+
+  GoldLambdaArn:
+    Value: !GetAtt GoldLambda.Arn
+    Export:
+      Name: GoldLambdaArn
+
+  DataProcessingLambdaName:
+    Value: !Ref DataProcessingLambda
+    Export:
+      Name: DataProcessingLambdaName
+
+  GoldLambdaName:
+    Value: !Ref GoldLambda
+    Export:
+      Name: GoldLambdaName
+
+  AthenaResultsBucketName:
+    Value: !Ref AthenaResultsBucket
+    Export:
+      Name: AthenaResultsBucketName
+
+  AthenaWorkGroupName:
+    Value: !Ref AthenaWorkGroup
+    Export:
+      Name: AthenaWorkGroupName
+
+  GlueDatabaseName:
+    Value: !Ref GlueDatabaseNoctua
+    Export:
+      Name: GlueDatabaseName

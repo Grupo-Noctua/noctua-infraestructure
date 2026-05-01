@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Storage layer (S3 buckets)
+
+Resources:
+  BronzeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: noctua-bucket-bronze-poc
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  SilverBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: noctua-bucket-silver-poc
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  GoldBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: noctua-bucket-gold-poc
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+Outputs:
+  BronzeBucketName:
+    Value: !Ref BronzeBucket
+    Export:
+      Name: BronzeBucketName
+
+  SilverBucketName:
+    Value: !Ref SilverBucket
+    Export:
+      Name: SilverBucketName
+
+  GoldBucketName:
+    Value: !Ref GoldBucket
+    Export:
+      Name: GoldBucketName
