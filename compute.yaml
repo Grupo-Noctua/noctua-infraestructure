@@ -129,7 +129,7 @@ Resources:
           systemctl start docker
           systemctl enable docker
           docker run -d -p 3000:3000 --name grafana grafana/grafana:12.4.3
-
+      
   EC2N8N:
     Type: AWS::EC2::Instance
     Properties:
@@ -152,6 +152,29 @@ Resources:
           systemctl start docker
           systemctl enable docker
           docker run -d -p 5678:5678 --name n8n n8nio/n8n
+
+  EC2Database:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref KeyPairName
+      ImageId: !Sub "{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}"
+      SubnetId: !ImportValue PRIVATE-BACKEND
+      SecurityGroupIds:
+        - !ImportValue SG-ID
+      IamInstanceProfile: LabInstanceProfile
+      Tags:
+        - Key: Name
+          Value: ec2-database
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          apt update -y
+          apt install -y mysql-server
+          systemctl enable mysql
+          systemctl start mysql
+
 
   ############################################################
   # Lambdas (processamento)
