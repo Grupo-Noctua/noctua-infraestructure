@@ -1,0 +1,1211 @@
+{
+  "name": "infra-teste noctua",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -14816,
+        2016
+      ],
+      "id": "9e327695-0023-40de-8263-70fbea334565",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://cloudformation.us-east-1.amazonaws.com/",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "aws",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": []
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "Action",
+              "value": "DeleteStack"
+            },
+            {
+              "name": "Version",
+              "value": "2010-05-15"
+            },
+            {
+              "name": "StackName",
+              "value": "={{ $json.stackName }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -14352,
+        2816
+      ],
+      "id": "e8c39710-c867-491f-8aed-b82b340add41",
+      "name": "deletando compute-stack",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  {\n    json: {\n      stackName: 'compute-stack'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14576,
+        2816
+      ],
+      "id": "625d1288-a8a5-469b-9b32-e7b03dfd3629",
+      "name": "js deletando compute-stack"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  {\n    json: {\n      stackName: 'storage-stack'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14592,
+        3088
+      ],
+      "id": "cf32250f-aceb-4cf4-8315-dcea39088954",
+      "name": "js deletando storage-stack"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://cloudformation.us-east-1.amazonaws.com/",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "aws",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": []
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "Action",
+              "value": "DeleteStack"
+            },
+            {
+              "name": "Version",
+              "value": "2010-05-15"
+            },
+            {
+              "name": "StackName",
+              "value": "={{ $json.stackName }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -14304,
+        3088
+      ],
+      "id": "4477d6f8-4266-4ead-b185-776c73d00186",
+      "name": "deletando storage-stack",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  {\n    json: {\n      stackName: 'network-stack'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14592,
+        3344
+      ],
+      "id": "74d2ef56-0dc9-4877-a615-be8bab6f269a",
+      "name": "js deletando network-stack"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://cloudformation.us-east-1.amazonaws.com/",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "aws",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": []
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "Action",
+              "value": "DeleteStack"
+            },
+            {
+              "name": "Version",
+              "value": "2010-05-15"
+            },
+            {
+              "name": "StackName",
+              "value": "={{ $json.stackName }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -14352,
+        3344
+      ],
+      "id": "8ef134a1-3206-4264-815a-dce5b328ff0a",
+      "name": "deletando network-stack",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "noctua-2026-bucket-bronze",
+        "fileName": "external/base_externa_bronze_pi.csv",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -13888,
+        1392
+      ],
+      "id": "527ab5b0-a6dc-4154-908a-db642fd933b5",
+      "name": "baixando base",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 150
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -14112,
+        2816
+      ],
+      "id": "7c707441-22ad-4de5-a032-fa3d0596ab3c",
+      "name": "Aguardando exclusão da compute-stack",
+      "webhookId": "e4f5a6b7-c8d9-4012-de34-56789abcdef01"
+    },
+    {
+      "parameters": {
+        "amount": 150
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -13552,
+        576
+      ],
+      "id": "622d30d2-f2b5-4e48-ad02-1b73722703fa",
+      "name": "Aguardando antes do bucket",
+      "webhookId": "4cfc60d5-cd8b-485c-8425-a7f38c3c8356"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fileBuffer = await this.helpers.getBinaryDataBuffer(0, 'data');\n\nconst templateBody = fileBuffer.toString('utf8');\n\nreturn [\n  {\n    json: {\n      stackName: 'network-stack',\n      templateBody: templateBody\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14192,
+        288
+      ],
+      "id": "11455fec-1700-4fce-a4b8-4c207ada77f6",
+      "name": "Code in JavaScript3"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\n\nconst fileBuffer = await this.helpers.getBinaryDataBuffer(\n  0,\n  'data'\n);\n\nconst templateBody = fileBuffer.toString('utf8');\n\nreturn [\n  {\n    json: {\n      stackName: 'storage-stack',\n      templateBody\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14192,
+        576
+      ],
+      "id": "8cf1636d-f736-46bb-9583-aa9b72d3cb58",
+      "name": "Code in JavaScript4"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://cloudformation.us-east-1.amazonaws.com/",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "aws",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": []
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "Action",
+              "value": "CreateStack"
+            },
+            {
+              "name": "Version",
+              "value": "2010-05-15"
+            },
+            {
+              "name": "StackName",
+              "value": "={{ $json.stackName }}"
+            },
+            {
+              "name": "TemplateBody",
+              "value": "={{ $json.templateBody }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -13888,
+        576
+      ],
+      "id": "278a2f58-bd11-4725-a2ce-b5f2f9807e4a",
+      "name": "Storage-stack1",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://cloudformation.us-east-1.amazonaws.com/",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "aws",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": []
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "Action",
+              "value": "CreateStack"
+            },
+            {
+              "name": "Version",
+              "value": "2010-05-15"
+            },
+            {
+              "name": "StackName",
+              "value": "={{ $json.stackName }}"
+            },
+            {
+              "name": "TemplateBody",
+              "value": "={{ $json.templateBody }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -13920,
+        288
+      ],
+      "id": "bcdacf24-1fb9-49ad-afb5-f4e28beec2ec",
+      "name": "network-stack1",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const fileBuffer = await this.helpers.getBinaryDataBuffer(0, 'data');\n\nconst templateBody = fileBuffer.toString('utf8');\n\nreturn [\n  {\n    json: {\n      stackName: 'compute-stack',\n      templateBody: templateBody\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -13888,
+        1104
+      ],
+      "id": "b489b7ab-d99b-497f-b56c-94bb12e2aae1",
+      "name": "Code in JavaScript5"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://cloudformation.us-east-1.amazonaws.com/",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "aws",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": []
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "Action",
+              "value": "CreateStack"
+            },
+            {
+              "name": "Version",
+              "value": "2010-05-15"
+            },
+            {
+              "name": "StackName",
+              "value": "={{ $json.stackName }}"
+            },
+            {
+              "name": "TemplateBody",
+              "value": "={{ $json.templateBody }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -13552,
+        1104
+      ],
+      "id": "5969acca-b55e-4b4a-a060-90e64a4123ae",
+      "name": "Compute-stack1",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "noctua-2026-bucket-bronze",
+        "fileName": "scripts/gold.py",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -13552,
+        848
+      ],
+      "id": "318ee0de-8222-49aa-b804-3f4080f69dee",
+      "name": "baixando gold1",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "noctua-2026-bucket-bronze",
+        "fileName": "scripts/silver.py",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -14192,
+        848
+      ],
+      "id": "23d5dc1a-1189-4b83-af71-e1061c4acc9b",
+      "name": "baixando silver1",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 150
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -13520,
+        288
+      ],
+      "id": "40268c57-7035-42a3-84b4-9b188e921c9c",
+      "name": "Aguardando antes da storage-stack1",
+      "webhookId": "7a3759ea-85a3-4fe6-a171-74f130eea48d"
+    },
+    {
+      "parameters": {
+        "fileSelector": "/files/storage.yaml",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -14528,
+        576
+      ],
+      "id": "73c875fd-7bef-4e70-af2d-2654417d57bc",
+      "name": "read storage.yaml1"
+    },
+    {
+      "parameters": {
+        "fileSelector": "/files/silver.py",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -14528,
+        848
+      ],
+      "id": "9d7191f8-409c-4c44-a4e9-3fe5c57a224d",
+      "name": "read silver.py1"
+    },
+    {
+      "parameters": {
+        "fileSelector": "/files/gold.py",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -13888,
+        848
+      ],
+      "id": "57bcf03e-ec5c-41ca-b131-0eab53558f6f",
+      "name": "read gold.py1"
+    },
+    {
+      "parameters": {
+        "amount": 60
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -14528,
+        1104
+      ],
+      "id": "1b8e9e81-d56b-494b-9d5a-e579d4424e46",
+      "name": "Aguardando antes da compute-stack1",
+      "webhookId": "26983eaf-c62a-4d55-a2bd-f502c4654c2b"
+    },
+    {
+      "parameters": {
+        "fileSelector": "/files/compute.yaml",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -14192,
+        1104
+      ],
+      "id": "b484b0b7-ce45-4423-a0d3-b553b41394f5",
+      "name": "read compute.yaml1"
+    },
+    {
+      "parameters": {
+        "fileSelector": "/files/base_externa_bronze_pi.csv",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -14192,
+        1392
+      ],
+      "id": "0948562f-96f9-472b-bf71-0bf3de2864b4",
+      "name": "read base1"
+    },
+    {
+      "parameters": {
+        "amount": 150
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -14528,
+        1392
+      ],
+      "id": "2990dd70-b351-42d5-b44c-3e13db5ae307",
+      "name": "Aguardando antes de subir a base",
+      "webhookId": "26983eaf-c62a-4d55-a2bd-f502c4654c2b"
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "operation": "delete",
+        "bucketName": "noctua-2026-bucket-bronze",
+        "folderKey": "scripts/"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -14544,
+        2016
+      ],
+      "id": "2a94f8a0-f460-4f4d-8461-6df20381321e",
+      "name": "delete folder scripts bucket bronze",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "operation": "delete",
+        "bucketName": "noctua-2026-bucket-bronze",
+        "folderKey": "external/"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -14352,
+        2016
+      ],
+      "id": "fdeeba4e-64a0-4b18-9383-6235fba9ac6f",
+      "name": "delete folder external bucket bronze",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "bucket",
+        "operation": "delete",
+        "name": "noctua-2026-bucket-bronze"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -14160,
+        2016
+      ],
+      "id": "02f659bf-2c63-4a81-9939-4fcef20a705e",
+      "name": "delete bucket bronze",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "bucket",
+        "operation": "delete",
+        "name": "noctua-2026-bucket-silver"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -14160,
+        2272
+      ],
+      "id": "cd26bc70-6e86-4d93-a6b6-d3456556f87e",
+      "name": "delete bucket silver",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "bucket",
+        "operation": "delete",
+        "name": "noctua-2026-bucket-gold"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -14112,
+        2544
+      ],
+      "id": "e43da4fb-5cb9-4fba-8803-e1c0243daaa3",
+      "name": "delete bucket gold",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 150
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -14080,
+        3088
+      ],
+      "id": "d8c4e6e2-cdca-478c-a5f6-c0a1ad95799a",
+      "name": "Aguardando exclusão da storage-stack1",
+      "webhookId": "e4f5a6b7-c8d9-4012-de34-56789abcdef01"
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "operation": "delete",
+        "bucketName": "noctua-2026-bucket-silver",
+        "folderKey": "df_final/"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -14592,
+        2272
+      ],
+      "id": "4b52d7a7-59b9-448d-aa57-c409a29d0e59",
+      "name": "delete folder df_final silver",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "operation": "delete",
+        "bucketName": "noctua-2026-bucket-silver",
+        "folderKey": "silver/"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -14384,
+        2272
+      ],
+      "id": "bfc8cc42-aec0-4c8d-b394-07a509ccba44",
+      "name": "delete folder silver/",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "operation": "delete",
+        "bucketName": "noctua-2026-bucket-gold",
+        "folderKey": "gold/"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -14384,
+        2544
+      ],
+      "id": "a91abdd1-c252-4592-b5b9-4d82b64c81ca",
+      "name": "delete folder silver/1",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "operation": "delete",
+        "bucketName": "noctua-2026-bucket-gold",
+        "folderKey": "df_gold/"
+      },
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        -14592,
+        2544
+      ],
+      "id": "aac46be7-9b93-4821-9177-15e75effa989",
+      "name": "delete folder df_gold",
+      "credentials": {
+        "aws": {
+          "id": "NOuNVp1FBEvWBWVb",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fileSelector": "/files/network.yaml",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -14544,
+        288
+      ],
+      "id": "8a2513ee-1883-44a8-abeb-617c6e8d4dd7",
+      "name": "lendo network.yaml"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "delete folder scripts bucket bronze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardando antes do bucket": {
+      "main": [
+        [
+          {
+            "node": "read silver.py1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "js deletando compute-stack": {
+      "main": [
+        [
+          {
+            "node": "deletando compute-stack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "deletando compute-stack": {
+      "main": [
+        [
+          {
+            "node": "Aguardando exclusão da compute-stack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardando exclusão da compute-stack": {
+      "main": [
+        [
+          {
+            "node": "js deletando storage-stack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "js deletando storage-stack": {
+      "main": [
+        [
+          {
+            "node": "deletando storage-stack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "deletando storage-stack": {
+      "main": [
+        [
+          {
+            "node": "Aguardando exclusão da storage-stack1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "js deletando network-stack": {
+      "main": [
+        [
+          {
+            "node": "deletando network-stack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "deletando network-stack": {
+      "main": [
+        []
+      ]
+    },
+    "Code in JavaScript3": {
+      "main": [
+        [
+          {
+            "node": "network-stack1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript4": {
+      "main": [
+        [
+          {
+            "node": "Storage-stack1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Storage-stack1": {
+      "main": [
+        [
+          {
+            "node": "Aguardando antes do bucket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "network-stack1": {
+      "main": [
+        [
+          {
+            "node": "Aguardando antes da storage-stack1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript5": {
+      "main": [
+        [
+          {
+            "node": "Compute-stack1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute-stack1": {
+      "main": [
+        [
+          {
+            "node": "Aguardando antes de subir a base",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "baixando gold1": {
+      "main": [
+        [
+          {
+            "node": "Aguardando antes da compute-stack1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "baixando silver1": {
+      "main": [
+        [
+          {
+            "node": "read gold.py1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardando antes da storage-stack1": {
+      "main": [
+        [
+          {
+            "node": "read storage.yaml1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read storage.yaml1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read silver.py1": {
+      "main": [
+        [
+          {
+            "node": "baixando silver1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read gold.py1": {
+      "main": [
+        [
+          {
+            "node": "baixando gold1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardando antes da compute-stack1": {
+      "main": [
+        [
+          {
+            "node": "read compute.yaml1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read compute.yaml1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read base1": {
+      "main": [
+        [
+          {
+            "node": "baixando base",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardando antes de subir a base": {
+      "main": [
+        [
+          {
+            "node": "read base1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "delete folder scripts bucket bronze": {
+      "main": [
+        [
+          {
+            "node": "delete folder external bucket bronze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "delete folder external bucket bronze": {
+      "main": [
+        [
+          {
+            "node": "delete bucket bronze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "delete bucket bronze": {
+      "main": [
+        [
+          {
+            "node": "delete folder df_final silver",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "delete bucket silver": {
+      "main": [
+        [
+          {
+            "node": "delete folder df_gold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "delete bucket gold": {
+      "main": [
+        [
+          {
+            "node": "js deletando compute-stack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardando exclusão da storage-stack1": {
+      "main": [
+        [
+          {
+            "node": "js deletando network-stack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "delete folder df_final silver": {
+      "main": [
+        [
+          {
+            "node": "delete folder silver/",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "delete folder silver/": {
+      "main": [
+        [
+          {
+            "node": "delete bucket silver",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "delete folder df_gold": {
+      "main": [
+        [
+          {
+            "node": "delete folder silver/1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "delete folder silver/1": {
+      "main": [
+        [
+          {
+            "node": "delete bucket gold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "lendo network.yaml": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "8ea5b82d-a91b-4aeb-ab56-e9fec14790a8",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f2a722469f742a24360e46ed9924741eaa5b4c8bae9f66356087ce41c2e8021e"
+  },
+  "nodeGroups": [],
+  "id": "4da0sQsYekMubbvx",
+  "tags": []
+}

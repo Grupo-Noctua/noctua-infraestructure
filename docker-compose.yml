@@ -1,0 +1,15 @@
+services:
+  n8n:
+    build: .
+    container_name: noctua-n8n
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_RESTRICT_FILE_ACCESS_TO=/files
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./infra:/files
+    restart: unless-stopped
+
+volumes:
+  n8n_data:
