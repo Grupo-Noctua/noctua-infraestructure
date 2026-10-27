@@ -1,0 +1,251 @@
+{
+  "name": "Noctua - application stack and deploy via SSM (Docker Hub)",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "id": "application-start",
+      "name": "Start application deploy"
+    },
+    {
+      "parameters": {"fileSelector": "/files/{application.local.json,application.yaml,scripts/remote_application.py,database/script-noctua.sql}", "options": {}},
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [220, 0],
+      "id": "application-read",
+      "name": "Read deployment files",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {"jsCode": "const crypto = require('crypto');\nconst zlib = require('zlib');\nconst files = {};\nfor (const [index, item] of $input.all().entries()) {\n  const name = item.binary?.data?.fileName;\n  if (!name) continue;\n  if (files[name] !== undefined) throw new Error('Duplicate input file: ' + name);\n  files[name] = (await this.helpers.getBinaryDataBuffer(index, 'data')).toString('utf8');\n}\nfor (const name of ['application.local.json', 'application.yaml', 'remote_application.py', 'script-noctua.sql']) {\n  if (!files[name]?.trim()) throw new Error('Missing deployment file: ' + name + '. Check the Compose mounts.');\n}\nconst source = JSON.parse(files['application.local.json'].replace(/^\\uFEFF/, ''));\nif (!source || Array.isArray(source) || typeof source !== 'object') throw new Error('Configuration must be a JSON object');\nconst keys = ['region', 'stack_name', 'compute_stack_name', 'frontend_ingress_cidr', 'instance_profile', 'frontend_instance_type', 'backend_instance_type', 'database_instance_type', 'backend_image', 'frontend_image', 'db_password_parameter', 'dockerhub_credentials_parameter', 'tls_parameter', 'server_name', 'athena_enabled', 'backend_memory'];\nconst config = Object.fromEntries(keys.map(key => [key, source[key]]));\nconst valid = (condition, message) => { if (!condition) throw new Error(message); };\nvalid(config.region === 'us-east-1', 'The base network requires us-east-1');\nvalid(typeof config.stack_name === 'string' && /^[a-zA-Z][a-zA-Z0-9-]{0,127}$/.test(config.stack_name), 'Invalid application stack name');\nvalid(!['network-stack', 'storage-stack', 'compute-stack', config.compute_stack_name].includes(config.stack_name), 'Use a dedicated application stack name');\nvalid(typeof config.athena_enabled === 'boolean', 'athena_enabled must be a boolean');\nvalid(typeof config.compute_stack_name === 'string' && /^[a-zA-Z][a-zA-Z0-9-]{0,127}$/.test(config.compute_stack_name), 'Invalid compute stack name');\nconst cidr = /^(\\d{1,3}(?:\\.\\d{1,3}){3})\\/(\\d{1,2})$/.exec(config.frontend_ingress_cidr || '');\nvalid(cidr && cidr[1].split('.').every(n => Number(n) <= 255) && Number(cidr[2]) <= 32, 'Invalid frontend IPv4 CIDR');\nvalid(Number(cidr[2]) !== 0 || config.tls_parameter, 'Use a restricted CIDR for HTTP or configure TLS');\nfor (const key of ['backend_image', 'frontend_image']) valid(typeof config[key] === 'string' && /^docker\\.io\\/[a-z0-9_-]+\\/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$/.test(config[key]), key + ' must use a Docker Hub sha256 digest');\nfor (const key of ['frontend_instance_type', 'backend_instance_type', 'database_instance_type']) valid(['t2.small', 't2.medium', 't3.small', 't3.medium'].includes(config[key]), 'Unsupported instance type: ' + key);\nvalid(typeof config.instance_profile === 'string' && /^[\\w+=,.@-]{1,128}$/.test(config.instance_profile), 'Invalid instance profile');\nfor (const key of ['db_password_parameter', 'dockerhub_credentials_parameter', 'tls_parameter']) {\n  valid(typeof config[key] === 'string', 'Missing parameter configuration: ' + key);\n  if (key === 'db_password_parameter' || config[key]) valid(/^\\/[a-zA-Z0-9_./-]+$/.test(config[key]), 'Invalid SSM parameter name: ' + key);\n}\nvalid(typeof config.server_name === 'string' && /^[a-zA-Z0-9_.-]+$/.test(config.server_name), 'Invalid server_name');\nvalid(!config.tls_parameter || config.server_name !== '_', 'TLS requires a hostname');\nvalid(typeof config.backend_memory === 'string' && /^[1-9][0-9]*[mg]$/.test(config.backend_memory), 'Invalid backend_memory');\nconst template = files['application.yaml'].replace(/^\\uFEFF/, '');\nvalid(Buffer.byteLength(template) <= 51200, 'CloudFormation TemplateBody exceeds 51200 bytes');\nconst bundle = zlib.gzipSync(Buffer.from(JSON.stringify({'remote_application.py': files['remote_application.py'], 'schema.sql': files['script-noctua.sql']}), 'utf8'));\nreturn [{json: {config, template, packageBase64: bundle.toString('base64'), packageSha256: crypto.createHash('sha256').update(bundle).digest('hex'), runToken: 'noctua-' + crypto.randomUUID(), startedAt: Date.now(), deadline: Date.now() + 600000, phase: 'exports', ready: false, waitSeconds: 0, exports: [], parameterNames: [...new Set([config.db_password_parameter, config.dockerhub_credentials_parameter, config.tls_parameter].filter(Boolean))], parameterIndex: 0, analytics: {}}}];"},
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "id": "application-parse",
+      "name": "Load deployment inputs"
+    },
+    {
+      "parameters": {"jsCode": "const s = {...$json};\nif (!Number.isFinite(s.deadline) || Date.now() > s.deadline) throw new Error('Infrastructure timeout in ' + s.phase + '; inspect CloudFormation/SSM before retrying');\nconst c = s.config;\nlet action, body = {}, service = 'cloudformation';\nswitch (s.phase) {\n  case 'exports': action = 'ListExports'; if (s.nextToken) body.NextToken = s.nextToken; break;\n  case 'secrets': service = 'ssm'; action = 'DescribeParameters'; body = {ParameterFilters: [{Key: 'Name', Option: 'Equals', Values: [s.parameterNames[s.parameterIndex]]}]}; if (s.nextToken) body.NextToken = s.nextToken; break;\n  case 'analytics': action = 'DescribeStacks'; body.StackName = c.compute_stack_name; break;\n  case 'validate': action = 'ValidateTemplate'; body.TemplateBody = s.template; break;\n  case 'inspect': case 'stack': case 'collect': action = 'DescribeStacks'; body.StackName = c.stack_name; break;\n  case 'plan': {\n    action = 'CreateChangeSet';\n    body = {StackName: c.stack_name, ChangeSetName: s.runToken, ChangeSetType: s.stackExists ? 'UPDATE' : 'CREATE', ClientToken: s.runToken, TemplateBody: s.template, Description: 'Noctua application stack and SSM deployment'};\n    const mapping = {InstanceProfileName: 'instance_profile', FrontendIngressCidr: 'frontend_ingress_cidr', FrontendInstanceType: 'frontend_instance_type', BackendInstanceType: 'backend_instance_type', DatabaseInstanceType: 'database_instance_type'};\n    const parameters = Object.entries(mapping).map(([ParameterKey, key]) => ({ParameterKey, ParameterValue: c[key]}));\n    if (s.stackExists) for (const parameter of s.previousParameters || []) {\n      if (!(parameter.ParameterKey in mapping)) parameters.push({ParameterKey: parameter.ParameterKey, UsePreviousValue: true});\n    }\n    parameters.forEach((parameter, index) => { for (const [key, value] of Object.entries(parameter)) body['Parameters.member.' + (index + 1) + '.' + key] = value; });\n    break;\n  }\n  case 'changeset': case 'execution': action = 'DescribeChangeSet'; body.ChangeSetName = s.changeSetId; break;\n  case 'execute': action = 'ExecuteChangeSet'; body = {ChangeSetName: s.changeSetId, ClientRequestToken: s.runToken}; break;\n  case 'cleanup': action = 'DeleteChangeSet'; body.ChangeSetName = s.changeSetId; break;\n  case 'online': service = 'ssm'; action = 'DescribeInstanceInformation'; body = {Filters: [{Key: 'InstanceIds', Values: s.instanceIds}]}; if (s.nextToken) body.NextToken = s.nextToken; break;\n  default: throw new Error('Unknown infrastructure phase: ' + s.phase);\n}\nconst encoded = service === 'ssm' ? JSON.stringify(body) : Object.entries({Action: action, Version: '2010-05-15', ...body}).map(([key, value]) => encodeURIComponent(key) + '=' + encodeURIComponent(String(value))).join('&');\nreturn [{json: {...s, api: {service, action, body: encoded}}}];"},
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [660, 0],
+      "id": "application-infra-request", "name": "Prepare infrastructure request"
+    },
+    {
+      "parameters": {"conditions": {"options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2}, "conditions": [{"id": "infra-service", "leftValue": "={{ $json.api.service === 'cloudformation' }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
+      "type": "n8n-nodes-base.if", "typeVersion": 2.2, "position": [880, 0],
+      "id": "application-infra-service", "name": "Use CloudFormation"
+    },
+    {
+      "parameters": {
+        "method": "POST", "url": "={{ 'https://cloudformation.' + $json.config.region + '.amazonaws.com/' }}",
+        "authentication": "predefinedCredentialType", "nodeCredentialType": "aws",
+        "sendHeaders": true, "headerParameters": {"parameters": [{"name": "Accept", "value": "application/xml"}]},
+        "sendBody": true, "contentType": "form-urlencoded", "specifyBody": "string",
+        "body": "={{ $json.api.body }}",
+        "options": {"timeout": 60000, "response": {"response": {"responseFormat": "text", "outputPropertyName": "body", "fullResponse": true, "neverError": true}}}
+      },
+      "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [1100, -100],
+      "id": "application-cfn", "name": "CloudFormation API", "retryOnFail": false
+    },
+    {
+      "parameters": {"jsCode": "// Transient HTTP failures may return HTML or an empty body instead of AWS XML.\nconst status = Number($json.statusCode ?? $json.status ?? 200);\nconst body = ('body' in $json) ? $json.body : $json;\nreturn [{json: {body: status === 429 || status >= 500 ? '<Response/>' : body}}];"},
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1320, -400],
+      "id": "application-xml-input", "name": "Prepare XML response"
+    },
+    {
+      "parameters": {"mode": "xmlToJson", "dataPropertyName": "body", "options": {"explicitArray": false, "explicitRoot": false, "ignoreAttrs": true}},
+      "type": "n8n-nodes-base.xml", "typeVersion": 1, "position": [1540, -400],
+      "id": "application-xml", "name": "Parse CloudFormation XML"
+    },
+    {
+      "parameters": {"jsCode": "// The XML node replaces the entire JSON item; restore the HTTP envelope.\nconst resp = $('CloudFormation API').item.json;\nconst status = Number(resp.statusCode ?? resp.status ?? 200);\nreturn [{json: {statusCode: status, body: $json}}];"},
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1760, -400],
+      "id": "application-xml-envelope", "name": "Restore CloudFormation status"
+    },
+    {
+      "parameters": {"jsCode": "// Normalize HTTP node output to an envelope {statusCode, body}.\nconst resp = $json;\nconst status = Number(resp.statusCode ?? resp.status ?? 200);\nconst body = ('body' in resp) ? resp.body : resp;\nreturn [{json: {statusCode: status, body}}];"},
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1940, -200],
+      "id": "application-normalize", "name": "Normalize HTTP response"
+    },
+    {
+      "parameters": {
+        "method": "POST", "url": "={{ 'https://ssm.' + $json.config.region + '.amazonaws.com/' }}",
+        "authentication": "predefinedCredentialType", "nodeCredentialType": "aws",
+        "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Amz-Target", "value": "={{ 'AmazonSSM.' + $json.api.action }}"}, {"name": "Content-Type", "value": "application/x-amz-json-1.1"}]},
+        "sendBody": true, "contentType": "json", "specifyBody": "json", "jsonBody": "={{ $json.api.body }}",
+        "options": {"timeout": 60000, "response": {"response": {"responseFormat": "json", "fullResponse": true, "neverError": true}}}
+      },
+      "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [1100, 140],
+      "id": "application-infra-ssm", "name": "SSM infrastructure API", "retryOnFail": false
+    },
+    {
+      "parameters": {"jsCode": "const s = {...$('Prepare infrastructure request').item.json, waitSeconds: 0};\nif (Date.now() > s.deadline) throw new Error('Infrastructure timeout in ' + s.phase);\nconst list = value => value == null || value === '' ? [] : Array.isArray(value) ? value : [value];\nconst members = value => list(value?.member);\nlet body = $json.body || {};\nbody = body[s.api.action + 'Response'] || body.ErrorResponse || body;\nconst result = body[s.api.action + 'Result'] || body;\nconst error = body.Error || result.Error;\nconst kind = String(error?.Code || body.__type || '');\nconst message = String(error?.Message || body.message || body.Message || '');\nconst status = Number($json.statusCode);\nconst absent = s.phase === 'inspect' && status === 400 && kind === 'ValidationError' && message.includes('does not exist') && message.includes(s.config.stack_name);\nconst transient = status === 429 || status >= 500 || /Throttl|RequestLimitExceeded/.test(kind);\nif (transient) {\n  if (['execute', 'plan'].includes(s.phase)) throw new Error('AWS ' + kind + ' HTTP ' + status + '; inspect change set ' + (s.changeSetId || s.runToken) + ' before retrying');\n  return [{json: {...s, waitSeconds: 10}}];\n}\nif (!absent && (kind || !Number.isFinite(status) || status < 200 || status >= 300)) throw new Error('AWS ' + kind + ' HTTP ' + status + ': ' + message + ' (phase ' + s.phase + ')');\nconst go = (phase, seconds = 0, timeout) => { s.phase = phase; s.waitSeconds = seconds; delete s.nextToken; if (timeout) s.deadline = Date.now() + timeout; };\nconst stack = () => { const values = members(result.Stacks); if (values.length !== 1) throw new Error('Expected exactly one stack in ' + s.phase); return values[0]; };\nconst out = data => Object.fromEntries(members(data.Outputs).map(item => [item.OutputKey, item.OutputValue]));\nconst healthy = data => ['CREATE_COMPLETE', 'UPDATE_COMPLETE'].includes(data.StackStatus);\nswitch (s.phase) {\n  case 'exports': {\n    s.exports = [...s.exports, ...members(result.Exports)];\n    if (result.NextToken) { s.nextToken = result.NextToken; break; }\n    const missing = ['VPC-ID', 'PUBLIC-SUBNET', 'PRIVATE-BACKEND', 'PRIVATE-DB'].filter(name => !s.exports.some(item => item.Name === name));\n    if (missing.length) throw new Error('Base network exports missing: ' + missing.join(', '));\n    if (s.exports.some(item => String(item.ExportingStackId || '').includes(':stack/' + s.config.stack_name + '/'))) throw new Error('Application stack must not be an existing network/export stack');\n    go('secrets'); break;\n  }\n  case 'secrets': {\n    const name = s.parameterNames[s.parameterIndex];\n    const parameter = list(result.Parameters).find(item => item.Name === name);\n    // DescribeParameters is best-effort and can return empty pages with NextToken.\n    if (!parameter && result.NextToken) { s.nextToken = result.NextToken; break; }\n    if (!parameter) throw new Error('Create the SecureString parameter before deploying: ' + name);\n    if (parameter.Type !== 'SecureString') throw new Error('Parameter must be SecureString: ' + name);\n    delete s.nextToken;\n    s.parameterIndex++;\n    if (s.parameterIndex >= s.parameterNames.length) go(s.config.athena_enabled ? 'analytics' : 'validate');\n    break;\n  }\n  case 'analytics': {\n    const data = stack(); s.analytics = out(data);\n    if (!healthy(data) || !s.analytics.GlueDatabaseName || !s.analytics.AthenaWorkGroupName) throw new Error('Healthy compute stack must provide GlueDatabaseName and AthenaWorkGroupName');\n    go('validate'); break;\n  }\n  case 'validate': go('inspect'); break;\n  case 'inspect': {\n    const data = absent ? null : stack();\n    if (data && !healthy(data) && data.StackStatus !== 'REVIEW_IN_PROGRESS') throw new Error('Application stack cannot be deployed from ' + data.StackStatus + '; inspect CloudFormation');\n    s.stackExists = !!data && data.StackStatus !== 'REVIEW_IN_PROGRESS';\n    s.previousParameters = s.stackExists ? members(data.Parameters) : [];\n    s.infrastructureAction = s.stackExists ? 'UPDATE' : 'CREATE';\n    go('plan'); break;\n  }\n  case 'plan':\n    if (!result.Id || !result.StackId) throw new Error('CloudFormation did not return change set and stack IDs');\n    s.changeSetId = result.Id; s.stackId = result.StackId; go('changeset', 10, 600000); break;\n  case 'changeset':\n    if (result.Status === 'FAILED') {\n      if (s.stackExists && /didn't contain changes|No updates are to be performed/.test(result.StatusReason || '')) { s.infrastructureAction = 'UNCHANGED'; go('cleanup'); }\n      else throw new Error('Change set failed: ' + result.StatusReason);\n    } else if (result.Status === 'CREATE_COMPLETE' && result.ExecutionStatus === 'AVAILABLE') {\n      s.changes = members(result.Changes); go('execute');\n    } else if (['CREATE_PENDING', 'CREATE_IN_PROGRESS'].includes(result.Status)) s.waitSeconds = 10;\n    else throw new Error('Unexpected change set status: ' + result.Status + '/' + result.ExecutionStatus);\n    break;\n  case 'execute': go('stack', 10, 2400000); break;\n  case 'stack': {\n    const data = stack();\n    if (healthy(data)) go('execution');\n    else if (['CREATE_IN_PROGRESS', 'UPDATE_IN_PROGRESS', 'UPDATE_COMPLETE_CLEANUP_IN_PROGRESS'].includes(data.StackStatus)) s.waitSeconds = 10;\n    else throw new Error('Application stack failed: ' + data.StackStatus + '; inspect CloudFormation events');\n    break;\n  }\n  case 'execution':\n    if (result.ExecutionStatus === 'EXECUTE_COMPLETE') go('collect');\n    else if (['AVAILABLE', 'EXECUTE_IN_PROGRESS'].includes(result.ExecutionStatus)) go('stack', 10);\n    else throw new Error('Change set execution failed: ' + result.ExecutionStatus);\n    break;\n  case 'cleanup': go('collect'); break;\n  case 'collect': {\n    const data = stack();\n    if (!healthy(data)) throw new Error('Application stack must be healthy before collecting outputs');\n    const values = out(data);\n    for (const key of ['FrontendInstanceId', 'FrontendPublicIp', 'BackendInstanceId', 'BackendPrivateIp', 'DatabaseInstanceId', 'DatabasePrivateIp', 'DatabaseVolumeId', 'DatabaseBackupBucket']) if (!values[key]) throw new Error('Missing stack output: ' + key);\n    s.applicationOutputs = values; s.stackId = data.StackId;\n    s.instanceIds = ['DatabaseInstanceId', 'BackendInstanceId', 'FrontendInstanceId'].map(key => values[key]);\n    if (new Set(s.instanceIds).size !== 3 || s.instanceIds.some(id => !/^i-[a-f0-9]{8,17}$/.test(id))) throw new Error('Invalid or duplicate instance IDs');\n    for (const key of ['FrontendPublicIp', 'BackendPrivateIp', 'DatabasePrivateIp']) if (!/^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(values[key]) || values[key].split('.').some(n => Number(n) > 255)) throw new Error('Invalid IP output: ' + key);\n    s.onlineIds = []; go('online', 0, 1200000); break;\n  }\n  case 'online':\n    s.onlineIds = [...new Set([...(s.onlineIds || []), ...list(result.InstanceInformationList).filter(item => item.PingStatus === 'Online').map(item => item.InstanceId)])];\n    if (result.NextToken) s.nextToken = result.NextToken;\n    else if (s.instanceIds.every(id => s.onlineIds.includes(id))) { s.ready = true; go('ready'); }\n    else { s.onlineIds = []; go('online', 10); }\n    break;\n  default: throw new Error('Unknown infrastructure response phase: ' + s.phase);\n}\nreturn [{json: s}];"},
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1540, 0],
+      "id": "application-infra-evaluate", "name": "Evaluate infrastructure response"
+    },
+    {
+      "parameters": {"conditions": {"options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2}, "conditions": [{"id": "infra-ready", "leftValue": "={{ $json.ready }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
+      "type": "n8n-nodes-base.if", "typeVersion": 2.2, "position": [1760, 0],
+      "id": "application-infra-ready", "name": "Infrastructure ready"
+    },
+    {
+      "parameters": {"amount": "={{ $json.waitSeconds }}", "unit": "seconds"},
+      "type": "n8n-nodes-base.wait", "typeVersion": 1.1, "position": [1760, 260],
+      "id": "application-infra-wait", "name": "Wait for infrastructure", "webhookId": "f26b7b10-8cd7-437e-a65d-d3d940a1fe42"
+    },
+    {
+      "parameters": {"jsCode": "const s = $json;\nif (!s.ready || s.phase !== 'ready') throw new Error('Infrastructure and SSM must be ready');\nconst c = s.config, out = s.applicationOutputs;\nconst keys = ['region', 'backend_image', 'frontend_image', 'db_password_parameter', 'dockerhub_credentials_parameter', 'tls_parameter', 'server_name', 'athena_enabled', 'backend_memory'];\nconst remote = Object.fromEntries(keys.map(key => [key, c[key]]));\nObject.assign(remote, {backend_private_ip: out.BackendPrivateIp, database_private_ip: out.DatabasePrivateIp, database_volume_id: out.DatabaseVolumeId, backup_bucket: out.DatabaseBackupBucket, athena_database: s.analytics.GlueDatabaseName || '', athena_workgroup: s.analytics.AthenaWorkGroupName || 'primary'});\nconst context = Buffer.from(JSON.stringify(remote), 'utf8').toString('base64');\nconst unpack = 'import gzip,json,pathlib,sys; p=pathlib.Path(sys.argv[1]); d=json.loads(gzip.decompress((p/\"package.json.gz\").read_bytes())); [(p/n).write_bytes(d[n].encode(\"utf-8\")) for n in (\"remote_application.py\",\"schema.sql\")]';\nconst steps = [['database', 'DatabaseInstanceId'], ['backend', 'BackendInstanceId'], ['frontend', 'FrontendInstanceId']].map(([component, key]) => ({component, instanceId: out[key], commands: [\n  'set -eu', 'umask 077', 'work=$(mktemp -d)', `trap 'rm -rf \"$work\"' EXIT`,\n  `printf '%s' '${s.packageBase64}' | base64 -d > \"$work/package.json.gz\"`,\n  `echo \"${s.packageSha256}  $work/package.json.gz\" | sha256sum -c -`,\n  `python3 -c '${unpack}' \"$work\"`,\n  `printf '%s' '${context}' | base64 -d > \"$work/config.json\"`,\n  `python3 \"$work/remote_application.py\" ${component} \"$work/config.json\"`\n]}));\nfor (const step of steps) if (Buffer.byteLength(JSON.stringify({DocumentName: 'AWS-RunShellScript', InstanceIds: [step.instanceId], Parameters: {commands: step.commands, executionTimeout: ['3600']}})) > 60000) throw new Error('SSM request too large; move the deployment bundle to S3');\nreturn [{json: {region: c.region, stackName: c.stack_name, frontendIp: out.FrontendPublicIp, frontendUrl: c.tls_parameter ? 'https://' + c.server_name : 'http://' + out.FrontendPublicIp, athenaEnabled: c.athena_enabled, infrastructure: {action: s.infrastructureAction, stackId: s.stackId, changeSetId: s.changeSetId}, startedAt: s.startedAt, steps, stepIndex: 0, results: []}}];"},
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1980, -100],
+      "id": "application-build", "name": "Build deployment request"
+    },
+    {
+      "parameters": {"jsCode": "const s = {...$json};\nif (!Number.isInteger(s.stepIndex) || !s.steps[s.stepIndex]) throw new Error('Invalid deployment step');\ndelete s.commandId; delete s.commandResult;\nreturn [{json: {...s, step: s.steps[s.stepIndex], done: false, pollCount: 0, stepStartedAt: Date.now(), deadline: Date.now() + 4200000}}];"},
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, -100],
+      "id": "application-select",
+      "name": "Select step"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://ssm.' + $json.region + '.amazonaws.com/' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "aws",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Amz-Target", "value": "AmazonSSM.SendCommand"}, {"name": "Content-Type", "value": "application/x-amz-json-1.1"}]},
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({DocumentName: 'AWS-RunShellScript', InstanceIds: [$json.step.instanceId], Comment: 'Noctua deploy ' + $json.step.component, TimeoutSeconds: 600, Parameters: {commands: $json.step.commands, executionTimeout: ['3600']} }) }}",
+        "options": {"timeout": 60000, "response": {"response": {"responseFormat": "json", "fullResponse": true, "neverError": true}}}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2420, -100],
+      "id": "application-send",
+      "name": "Send SSM command",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {"jsCode": "const context = $('Select step').item.json;\nconst body = ('body' in $json) ? $json.body || {} : $json || {};\nconst status = Number($json.statusCode ?? $json.status ?? 200);\nif (status !== 200 || body.__type || !/^[a-f0-9]{8}-[a-f0-9-]{27}$/.test(body.Command?.CommandId || '')) throw new Error('SSM SendCommand failed: ' + (body.__type || status) + '. Inspect SSM command history before retrying to avoid duplicate deployment.');\nreturn [{json: {...context, commandId: body.Command.CommandId}}];"},
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2640, -100],
+      "id": "application-save",
+      "name": "Track SSM command"
+    },
+    {
+      "parameters": {"amount": 10, "unit": "seconds"},
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2860, -100],
+      "id": "application-wait",
+      "name": "Wait before polling",
+      "webhookId": "58ec5ad5-29f0-46af-9b9f-7d31fd92df71"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://ssm.' + $json.region + '.amazonaws.com/' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "aws",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Amz-Target", "value": "AmazonSSM.GetCommandInvocation"}, {"name": "Content-Type", "value": "application/x-amz-json-1.1"}]},
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({CommandId: $json.commandId, InstanceId: $json.step.instanceId}) }}",
+        "options": {"timeout": 60000, "response": {"response": {"responseFormat": "json", "fullResponse": true, "neverError": true}}}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3080, -100],
+      "id": "application-get",
+      "name": "Get SSM status"
+    },
+    {
+      "parameters": {"jsCode": "const context = $('Wait before polling').item.json;\nif (!Number.isFinite(context.deadline) || Date.now() > context.deadline) throw new Error('SSM timeout: inspect command ' + context.commandId + ' before retrying.');\nconst s = {...context, pollCount: (context.pollCount || 0) + 1, done: false};\nconst body = ('body' in $json) ? $json.body || {} : $json || {};\nconst http = Number($json.statusCode ?? $json.status ?? 200);\nconst kind = String(body.__type || '');\nif (kind.includes('InvocationDoesNotExist') || http === 429 || http >= 500 || /Throttl|RequestLimitExceeded/.test(kind)) return [{json: s}];\nif (kind || http !== 200) throw new Error('AWS error ' + kind + ' HTTP ' + http + ': renew the lab credential if expired. Command: ' + s.commandId);\nif ((body.CommandId && body.CommandId !== s.commandId) || (body.InstanceId && body.InstanceId !== s.step.instanceId)) throw new Error('SSM returned a different command or instance');\nif (body.Status === 'Success' && body.ResponseCode === 0) {\n  s.done = true;\n  s.commandResult = {component: s.step.component, instanceId: s.step.instanceId, commandId: s.commandId, status: body.Status, responseCode: body.ResponseCode, pollCount: s.pollCount, durationSeconds: Math.round((Date.now() - s.stepStartedAt) / 1000), standardOutput: body.StandardOutputContent || '', standardError: body.StandardErrorContent || ''};\n  return [{json: s}];\n}\nif (['Pending', 'InProgress', 'Delayed', 'Cancelling'].includes(body.Status)) return [{json: s}];\nthrow new Error(s.step.component + ' failed (' + body.Status + ', exit ' + body.ResponseCode + '). Inspect SSM command ' + s.commandId + ': ' + (body.StandardErrorContent || body.StandardOutputContent || body.StatusDetails || 'No command output'));"},
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3300, -100],
+      "id": "application-evaluate",
+      "name": "Evaluate command result"
+    },
+    {
+      "parameters": {"conditions": {"options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2}, "conditions": [{"id": "command-done", "leftValue": "={{ $json.done }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [3520, -100],
+      "id": "application-done",
+      "name": "Command succeeded"
+    },
+    {
+      "parameters": {"jsCode": "if (!$json.done || $json.commandResult?.status !== 'Success' || $json.commandResult.responseCode !== 0) throw new Error('Cannot advance until the command succeeds');\nreturn [{json: {...$json, results: [...$json.results, $json.commandResult], stepIndex: $json.stepIndex + 1}}];"},
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3740, -200],
+      "id": "application-next",
+      "name": "Advance step"
+    },
+    {
+      "parameters": {"conditions": {"options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2}, "conditions": [{"id": "more-steps", "leftValue": "={{ $json.stepIndex < $json.steps.length }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [3960, -200],
+      "id": "application-more",
+      "name": "More steps"
+    },
+    {
+      "parameters": {"jsCode": "const s = $json;\nif (s.stepIndex !== 3 || s.results?.length !== 3 || s.results.some((result, index) => result.component !== ['database', 'backend', 'frontend'][index] || result.status !== 'Success' || result.responseCode !== 0)) throw new Error('Deployment is incomplete');\nreturn [{json: {status: 'DEPLOY_VALIDATED', stack: s.stackName, region: s.region, infrastructure: s.infrastructure, frontendIp: s.frontendIp, frontendUrl: s.frontendUrl, athenaValidated: s.athenaEnabled, durationSeconds: Math.round((Date.now() - s.startedAt) / 1000), components: s.results, note: 'Frontend proxy validated. Current UI still uses mock data. See SSM output for deployed image digests.'}}];"},
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4180, -100],
+      "id": "application-finish",
+      "name": "Deployment result"
+    },
+    {
+      "parameters": {"content": "## 1. Inputs and AWS credential\nConfigure files/application.local.json with published image digests. Compose mounts application.yaml, scripts/remote_application.py and database/script-noctua.sql. No prepare command needed.\n\nSelect the SAME AWS credential (us-east-1 + current session token) in all FOUR HTTP nodes. Create the database SecureString before running. Run only one deployment at a time.", "height": 260, "width": 620},
+      "type": "n8n-nodes-base.stickyNote", "typeVersion": 1, "position": [0, -380], "id": "application-input-note", "name": "Inputs and credentials"
+    },
+    {
+      "parameters": {"content": "## 2. Provision application.yaml\nChecks network exports, secret metadata and optional compute outputs. Validates template, creates/updates the application change set and EXECUTES it automatically. Preserves unmanaged parameters on updates. No-change plans reuse the stack.\n\nWaits for CloudFormation completion AND change-set execution, then all 3 EC2s Online in SSM. Inspect CloudFormation events on failure. Network/NAT and analytics data must already be ready.", "height": 280, "width": 740},
+      "type": "n8n-nodes-base.stickyNote", "typeVersion": 1, "position": [880, -800], "id": "application-infra-note", "name": "Infrastructure lifecycle"
+    },
+    {
+      "parameters": {"content": "## 3. Deploy and validate\nDatabase -> backend -> frontend. Each SSM command must return Success + exit 0. Polling retries eventual consistency/throttling and fails on timeout or command errors.\n\nRemote script also waits for bootstrap-ready. Commands may continue if n8n stops: inspect CommandId before retrying. Final output includes results and logs for all three components.", "height": 240, "width": 740},
+      "type": "n8n-nodes-base.stickyNote", "typeVersion": 1, "position": [2420, -440], "id": "application-deploy-note", "name": "Deployment validation"
+    }
+  ],
+  "connections": {
+    "Start application deploy": {"main": [[{"node": "Read deployment files", "type": "main", "index": 0}]]},
+    "Read deployment files": {"main": [[{"node": "Load deployment inputs", "type": "main", "index": 0}]]},
+    "Load deployment inputs": {"main": [[{"node": "Prepare infrastructure request", "type": "main", "index": 0}]]},
+    "Prepare infrastructure request": {"main": [[{"node": "Use CloudFormation", "type": "main", "index": 0}]]},
+    "Use CloudFormation": {"main": [[{"node": "CloudFormation API", "type": "main", "index": 0}], [{"node": "SSM infrastructure API", "type": "main", "index": 0}]]},
+    "CloudFormation API": {"main": [[{"node": "Prepare XML response", "type": "main", "index": 0}]]},
+    "Prepare XML response": {"main": [[{"node": "Parse CloudFormation XML", "type": "main", "index": 0}]]},
+    "Parse CloudFormation XML": {"main": [[{"node": "Restore CloudFormation status", "type": "main", "index": 0}]]},
+    "Restore CloudFormation status": {"main": [[{"node": "Evaluate infrastructure response", "type": "main", "index": 0}]]},
+    "SSM infrastructure API": {"main": [[{"node": "Normalize HTTP response", "type": "main", "index": 0}]]},
+    "Normalize HTTP response": {"main": [[{"node": "Evaluate infrastructure response", "type": "main", "index": 0}]]},
+    "Evaluate infrastructure response": {"main": [[{"node": "Infrastructure ready", "type": "main", "index": 0}]]},
+    "Infrastructure ready": {"main": [[{"node": "Build deployment request", "type": "main", "index": 0}], [{"node": "Wait for infrastructure", "type": "main", "index": 0}]]},
+    "Wait for infrastructure": {"main": [[{"node": "Prepare infrastructure request", "type": "main", "index": 0}]]},
+    "Build deployment request": {"main": [[{"node": "Select step", "type": "main", "index": 0}]]},
+    "Select step": {"main": [[{"node": "Send SSM command", "type": "main", "index": 0}]]},
+    "Send SSM command": {"main": [[{"node": "Track SSM command", "type": "main", "index": 0}]]},
+    "Track SSM command": {"main": [[{"node": "Wait before polling", "type": "main", "index": 0}]]},
+    "Wait before polling": {"main": [[{"node": "Get SSM status", "type": "main", "index": 0}]]},
+    "Get SSM status": {"main": [[{"node": "Evaluate command result", "type": "main", "index": 0}]]},
+    "Evaluate command result": {"main": [[{"node": "Command succeeded", "type": "main", "index": 0}]]},
+    "Command succeeded": {"main": [[{"node": "Advance step", "type": "main", "index": 0}], [{"node": "Wait before polling", "type": "main", "index": 0}]]},
+    "Advance step": {"main": [[{"node": "More steps", "type": "main", "index": 0}]]},
+    "More steps": {"main": [[{"node": "Select step", "type": "main", "index": 0}], [{"node": "Deployment result", "type": "main", "index": 0}]]}
+  },
+  "settings": {"executionOrder": "v1"},
+  "active": false,
+  "pinData": {},
+  "tags": []
+}

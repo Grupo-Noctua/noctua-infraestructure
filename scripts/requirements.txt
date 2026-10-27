@@ -1,0 +1,2 @@
+# Only needed to inspect/convert the existing YAML template for retirement.
+PyYAML>=6.0.2,<7

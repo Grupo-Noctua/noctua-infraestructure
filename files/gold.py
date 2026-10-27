@@ -27,15 +27,26 @@ OUTPUT_PATH = args["output_path"].rstrip("/")
 # =========================
 # 2) Leitura da base silver
 # =========================
-df = (
-    spark.read
-    .option("header", "true")
-    .option("sep", ",")
-    .option("encoding", "utf-8")
-    .option("quote", '"')
-    .option("escape", '"')
-    .csv(INPUT_PATH)
+input_format = (
+    getResolvedOptions(sys.argv, ["input_format"])["input_format"]
+    if "--input_format" in sys.argv
+    else ("parquet" if INPUT_PATH.endswith(".parquet") else "csv")
 )
+if input_format == "parquet":
+    df = spark.read.parquet(INPUT_PATH)
+elif input_format == "csv":
+    df = (
+        spark.read
+        .option("header", "true")
+        .option("sep", ",")
+        .option("encoding", "utf-8")
+        .option("quote", '"')
+        .option("escape", '"')
+        .option("multiLine", "true")
+        .csv(INPUT_PATH)
+    )
+else:
+    raise ValueError(f"Formato de entrada nao suportado: {input_format}")
 
 print(f"Linhas lidas da base silver: {df.count()}")
 print(f"Colunas disponíveis: {len(df.columns)}")

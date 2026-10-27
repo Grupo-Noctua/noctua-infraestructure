@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import re
 import sys
@@ -6,6 +8,7 @@ import unicodedata
 from pyspark.context import SparkContext
 from pyspark.sql import functions as F
 from pyspark.sql.functions import create_map, lit, col
+from pyspark.sql.types import StringType, StructField, StructType
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
@@ -59,35 +62,49 @@ def deduplicate_columns(cols):
 # =========================
 # 4) Leitura CSV
 # =========================
-df = (
-    spark.read
-    .option("header", "true")
-    .option("sep", ";")
-    .option("encoding", "ISO-8859-1")
-    .option("quote", '"')
-    .option("escape", '"')
-    .csv(INPUT_PATH)
-)
-
-if len(df.columns) > 0 and df.columns[0].lower().startswith("column"):
-    raw = (
-        spark.read
-        .option("header", "false")
-        .option("sep", ";")
-        .option("encoding", "ISO-8859-1")
-        .option("quote", '"')
-        .option("escape", '"')
-        .csv(INPUT_PATH)
+def source_document(content):
+    # Parse whole documents: the survey contains embedded newlines and doubled
+    # quotes. JVM CSV parsing previously split or merged valid survey records.
+    reader = csv.reader(
+        io.StringIO(content.decode("iso-8859-1"), newline=""),
+        delimiter=";", quotechar='"', doublequote=True,
     )
+    header = next(reader)
+    if header and header[0].lower().startswith("column"):
+        header = next(reader)
+    return tuple(deduplicate_columns([normalize_colname(c) for c in header])), reader
 
-    header_row = raw.first()
-    header_vals = [str(x) if x is not None else "coluna" for x in header_row]
-    header_vals = deduplicate_columns([normalize_colname(h) for h in header_vals])
 
-    df = raw.filter(F.col("_c0") != header_row[0]).toDF(*header_vals)
-else:
-    normalized = deduplicate_columns([normalize_colname(c) for c in df.columns])
-    df = df.toDF(*normalized)
+def source_width(content):
+    header, reader = source_document(content)
+    return max((len(row) for row in reader), default=len(header))
+
+
+def source_rows(content, columns):
+    header, reader = source_document(content)
+    if header != tuple(columns[:len(header)]):
+        raise ValueError("Cabecalhos diferentes entre arquivos de origem")
+    for row in reader:
+        if not row:
+            continue
+        # Preserve extra source fields and pad short records instead of shifting
+        # named columns. Empty CSV fields retain SQL NULL semantics.
+        if len(row) > len(columns):
+            raise ValueError("Registro excede a largura calculada da origem")
+        yield tuple(value if value != "" else None for value in row) + (None,) * (len(columns) - len(row))
+
+
+# A multiline document cannot be split at arbitrary line boundaries. Distribute
+# independent files to Spark workers and keep only headers/widths on the driver.
+documents = sc.binaryFiles(INPUT_PATH).cache()
+headers = documents.map(lambda item: source_document(item[1])[0]).distinct().collect()
+if len(headers) != 1:
+    raise ValueError("Informe arquivos CSV com um unico esquema de origem")
+columns = list(headers[0])
+width = documents.map(lambda item: source_width(item[1])).max()
+columns += [f"coluna_extra_{index}" for index in range(len(columns), width)]
+schema = StructType([StructField(name, StringType(), True) for name in columns])
+df = spark.createDataFrame(documents.flatMap(lambda item: source_rows(item[1], columns)), schema)
 
 
 # =========================
@@ -153,6 +170,27 @@ colunas_rem_norm = [normalize_colname(c) for c in colunas_rem]
 cols_existentes_para_remover = [c for c in colunas_rem_norm if c in df.columns]
 df_final = df.drop(*cols_existentes_para_remover)
 
+# Keep numeric indicators typed in Parquet; Athena compares these values to 1.
+# Reject unexpected source values instead of silently converting them to null.
+language_columns = [
+    "sql", "r", "python", "c_c_c", "net", "java", "julia", "sas_stata",
+    "visual_basic_vba", "scala", "matlab", "php", "javascript",
+    "nao_utilizo_nenhuma_linguagem",
+]
+missing_columns = set(language_columns + ["id", "nivel", "atuacao"]) - set(df_final.columns)
+if missing_columns:
+    raise ValueError(f"Colunas obrigatorias ausentes: {sorted(missing_columns)}")
+invalid_language = F.lit(False)
+for name in language_columns:
+    value = F.trim(F.col(name))
+    invalid_language = invalid_language | (
+        value.isNotNull() & (value != "") & ~value.isin("0", "1", "0.0", "1.0")
+    )
+if df_final.filter(invalid_language).limit(1).count():
+    raise ValueError("Indicador de linguagem fora do dominio 0/1 na fonte")
+for name in language_columns:
+    df_final = df_final.withColumn(name, F.col(name).cast("int"))
+
 
 # =========================
 # 6) Contagem de nulos
@@ -211,6 +249,8 @@ df_infos = df_final.select(*cols_infos_existentes)
 
 if "id" in df_infos.columns and "id" in cargos.columns and "cargo_map" in cargos.columns:
     df_gerais = df_infos.join(cargos.select("id", "cargo_map"), on="id", how="left")
+    # CSV only supports scalar columns. Keep the auxiliary map as JSON text.
+    df_gerais = df_gerais.withColumn("cargo_map", F.to_json(F.col("cargo_map")))
 else:
     df_gerais = df_infos
 
@@ -218,20 +258,22 @@ else:
 # =========================
 # 8) Escrita no S3
 # =========================
+print(f"Registros Silver: {df_final.count()}")
+# The crawler targets /silver/: keep one schema there so it creates table silver.
+# Parquet preserves column boundaries, numeric types and nulls in survey answers.
+# Auxiliary information has a different schema and lives outside that prefix.
+GENERAL_OUTPUT_PATH = f"{OUTPUT_PATH}_gerais"
 (
-    df_final.write.mode("overwrite")
-    .option("header", "true")
-    .option("sep", ",")
-    .csv(f"{OUTPUT_PATH}/df_final")
+    df_final.write.mode("overwrite").parquet(OUTPUT_PATH)
 )
 
 (
     df_gerais.write.mode("overwrite")
     .option("header", "true")
     .option("sep", ",")
-    .csv(f"{OUTPUT_PATH}/df_gerais")
+    .csv(GENERAL_OUTPUT_PATH)
 )
 
-print(f"Arquivos CSV salvos em: {OUTPUT_PATH}/df_final e {OUTPUT_PATH}/df_gerais")
+print(f"Silver Parquet salva em: {OUTPUT_PATH}; CSV auxiliar em: {GENERAL_OUTPUT_PATH}")
 
 job.commit()

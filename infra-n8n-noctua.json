@@ -808,7 +808,7 @@
       "main": [
         [
           {
-            "node": "delete folder scripts bucket bronze",
+            "node": "lendo network.yaml",
             "type": "main",
             "index": 0
           }

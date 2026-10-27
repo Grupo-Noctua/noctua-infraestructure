@@ -1,0 +1,19 @@
+{
+  "region": "us-east-1",
+  "profile": "noctua-lab",
+  "stack_name": "noctua-application",
+  "compute_stack_name": "compute-stack",
+  "frontend_ingress_cidr": "SEU_IP_PUBLICO/32",
+  "instance_profile": "LabInstanceProfile",
+  "frontend_instance_type": "t3.small",
+  "backend_instance_type": "t3.small",
+  "database_instance_type": "t3.small",
+  "backend_image": "docker.io/SEU_USUARIO/noctua-backend@sha256:DIGEST",
+  "frontend_image": "docker.io/SEU_USUARIO/noctua-frontend@sha256:DIGEST",
+  "db_password_parameter": "/noctua/lab/mysql/api-password",
+  "dockerhub_credentials_parameter": "",
+  "tls_parameter": "",
+  "server_name": "_",
+  "athena_enabled": true,
+  "backend_memory": "768m"
+}

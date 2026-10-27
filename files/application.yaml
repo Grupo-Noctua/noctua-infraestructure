@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Noctua application - MySQL, Docker Hub backend/frontend and retained database storage (AWS Academy)
+
+Parameters:
+  InstanceProfileName:
+    Type: String
+    Default: LabInstanceProfile
+  UbuntuAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+  FrontendInstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t2.small, t2.medium, t3.small, t3.medium]
+  BackendInstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t2.small, t2.medium, t3.small, t3.medium]
+  DatabaseInstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t2.small, t2.medium, t3.small, t3.medium]
+  FrontendIngressCidr:
+    Type: String
+    Description: IPv4 CIDR allowed to access the frontend (use your public IP/32 during HTTP validation)
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}/\d{1,2}'
+  DatabaseVolumeSize:
+    Type: Number
+    Default: 20
+    MinValue: 20
+
+Resources:
+  FrontendSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Noctua frontend HTTP and HTTPS
+      VpcId: !ImportValue VPC-ID
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref FrontendIngressCidr}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref FrontendIngressCidr}
+  BackendSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Noctua API reachable only from frontend
+      VpcId: !ImportValue VPC-ID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref FrontendSecurityGroup
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Noctua MySQL reachable only from API
+      VpcId: !ImportValue VPC-ID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref BackendSecurityGroup
+
+  ApplicationLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref UbuntuAmi
+        IamInstanceProfile:
+          Name: !Ref InstanceProfileName
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeSize: 16
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y docker.io curl unzip python3 rsync mysql-client
+            systemctl enable --now docker
+            work=$(mktemp -d)
+            trap 'rm -rf "$work"' EXIT
+            curl --fail --retry 5 -o "$work/aws.zip" https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+            unzip -q "$work/aws.zip" -d "$work"
+            "$work/aws/install" --update
+            if ! snap list amazon-ssm-agent >/dev/null 2>&1; then
+              snap install amazon-ssm-agent --classic
+            fi
+            snap start --enable amazon-ssm-agent
+            install -d -m 0700 /opt/noctua
+            touch /opt/noctua/bootstrap-ready
+
+  EC2Frontend:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ApplicationLaunchTemplate
+        Version: !GetAtt ApplicationLaunchTemplate.LatestVersionNumber
+      InstanceType: !Ref FrontendInstanceType
+      SubnetId: !ImportValue PUBLIC-SUBNET
+      SecurityGroupIds: [!Ref FrontendSecurityGroup]
+      Tags:
+        - {Key: Name, Value: !Sub '${AWS::StackName}-frontend'}
+  FrontendAddress:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref EC2Frontend
+  EC2Backend:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ApplicationLaunchTemplate
+        Version: !GetAtt ApplicationLaunchTemplate.LatestVersionNumber
+      InstanceType: !Ref BackendInstanceType
+      SubnetId: !ImportValue PRIVATE-BACKEND
+      SecurityGroupIds: [!Ref BackendSecurityGroup]
+      Tags:
+        - {Key: Name, Value: !Sub '${AWS::StackName}-backend'}
+  EC2DatabaseApp:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ApplicationLaunchTemplate
+        Version: !GetAtt ApplicationLaunchTemplate.LatestVersionNumber
+      InstanceType: !Ref DatabaseInstanceType
+      SubnetId: !ImportValue PRIVATE-DB
+      SecurityGroupIds: [!Ref DatabaseSecurityGroup]
+      Tags:
+        - {Key: Name, Value: !Sub '${AWS::StackName}-mysql'}
+  DatabaseDataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !GetAtt EC2DatabaseApp.AvailabilityZone
+      Size: !Ref DatabaseVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - {Key: Name, Value: !Sub '${AWS::StackName}-mysql-data'}
+  DatabaseDataAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref EC2DatabaseApp
+      VolumeId: !Ref DatabaseDataVolume
+  DatabaseBackups:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      VersioningConfiguration: {Status: Enabled}
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireBackups
+            Status: Enabled
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration: {NoncurrentDays: 30}
+
+Outputs:
+  FrontendInstanceId: {Value: !Ref EC2Frontend}
+  FrontendPublicIp: {Value: !Ref FrontendAddress}
+  BackendInstanceId: {Value: !Ref EC2Backend}
+  BackendPrivateIp: {Value: !GetAtt EC2Backend.PrivateIp}
+  DatabaseInstanceId: {Value: !Ref EC2DatabaseApp}
+  DatabasePrivateIp: {Value: !GetAtt EC2DatabaseApp.PrivateIp}
+  DatabaseVolumeId: {Value: !Ref DatabaseDataVolume}
+  DatabaseBackupBucket: {Value: !Ref DatabaseBackups}
