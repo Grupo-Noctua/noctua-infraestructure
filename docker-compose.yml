@@ -11,7 +11,9 @@ services:
       - n8n_data:/home/node/.n8n
       - ./files:/files
       - ./scripts:/files/scripts:ro
-      - ${NOCTUA_SCHEMA_DIRECTORY:-../noctua-backend/database}:/files/database:ro
+      # Map the repository's database folder into the container so /files/database is available.
+      # The previous default (../noctua-backend/database) may not exist and would hide ./files/database.
+      - ./files/database:/files/database:ro
     restart: unless-stopped
 
 volumes:

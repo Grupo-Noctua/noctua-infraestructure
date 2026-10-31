@@ -34,6 +34,18 @@ Resources:
         - Key: Name
           Value: public-subnet
 
+  # Subnet Pública 2 (outro AZ) - necessária para ALB
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: us-east-1b
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: public-subnet-2
+
   # Subnet Privada Backend
   PrivateSubnetBackend:
     Type: AWS::EC2::Subnet
@@ -152,6 +164,11 @@ Outputs:
     Value: !Ref PublicSubnet
     Export:
       Name: PUBLIC-SUBNET
+
+  PublicSubnet2Id:
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: PUBLIC-SUBNET-2
 
   PrivateSubnetBackendId:
     Value: !Ref PrivateSubnetBackend

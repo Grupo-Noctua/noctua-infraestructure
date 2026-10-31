@@ -38,6 +38,14 @@ Resources:
       SecurityGroupIngress:
         - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref FrontendIngressCidr}
         - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref FrontendIngressCidr}
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Noctua ALB security group
+      VpcId: !ImportValue VPC-ID
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref FrontendIngressCidr}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref FrontendIngressCidr}
   BackendSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -47,7 +55,7 @@ Resources:
         - IpProtocol: tcp
           FromPort: 8080
           ToPort: 8080
-          SourceSecurityGroupId: !Ref FrontendSecurityGroup
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
   DatabaseSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -97,22 +105,58 @@ Resources:
             install -d -m 0700 /opt/noctua
             touch /opt/noctua/bootstrap-ready
 
-  EC2Frontend:
-    Type: AWS::EC2::Instance
+  # Frontends replaced by an Auto Scaling Group so CloudFormation manages target registration
+  FrontendAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       LaunchTemplate:
         LaunchTemplateId: !Ref ApplicationLaunchTemplate
         Version: !GetAtt ApplicationLaunchTemplate.LatestVersionNumber
-      InstanceType: !Ref FrontendInstanceType
-      SubnetId: !ImportValue PUBLIC-SUBNET
-      SecurityGroupIds: [!Ref FrontendSecurityGroup]
+      MinSize: '2'
+      MaxSize: '2'
+      DesiredCapacity: '2'
+      VPCZoneIdentifier:
+        - !ImportValue PUBLIC-SUBNET
+        - !ImportValue PUBLIC-SUBNET-2
+      TargetGroupARNs:
+        - !Ref FrontendTargetGroup
       Tags:
-        - {Key: Name, Value: !Sub '${AWS::StackName}-frontend'}
-  FrontendAddress:
-    Type: AWS::EC2::EIP
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-frontend'
+          PropagateAtLaunch: true
+
+  FrontendLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Domain: vpc
-      InstanceId: !Ref EC2Frontend
+      Name: !Sub '${AWS::StackName}-alb'
+      Scheme: internet-facing
+      Subnets:
+        - !ImportValue PUBLIC-SUBNET
+        - !ImportValue PUBLIC-SUBNET-2
+      SecurityGroups: [!Ref LoadBalancerSecurityGroup]
+      Type: application
+
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      VpcId: !ImportValue VPC-ID
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+
+  FrontendListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref FrontendTargetGroup
+      LoadBalancerArn: !Ref FrontendLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # TargetGroupAttachment resources removed. ASG will register instances in the target group.
   EC2Backend:
     Type: AWS::EC2::Instance
     Properties:
@@ -174,8 +218,8 @@ Resources:
             NoncurrentVersionExpiration: {NoncurrentDays: 30}
 
 Outputs:
-  FrontendInstanceId: {Value: !Ref EC2Frontend}
-  FrontendPublicIp: {Value: !Ref FrontendAddress}
+  FrontendAutoScalingGroupName: {Value: !Ref FrontendAutoScalingGroup}
+  FrontendLoadBalancerDnsName: {Value: !GetAtt FrontendLoadBalancer.DNSName}
   BackendInstanceId: {Value: !Ref EC2Backend}
   BackendPrivateIp: {Value: !GetAtt EC2Backend.PrivateIp}
   DatabaseInstanceId: {Value: !Ref EC2DatabaseApp}

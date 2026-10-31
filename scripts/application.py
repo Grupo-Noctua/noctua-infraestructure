@@ -195,7 +195,23 @@ def deployment_context(config):
     })
     if config['athena_enabled'] and not remote['athena_database']:
         raise ValueError('Glue database output is missing from compute stack')
-    wait_ssm(config, [out[key] for key in ['DatabaseInstanceId', 'BackendInstanceId', 'FrontendInstanceId']])
+    # Determine frontend instance ids:
+    frontend_ids = []
+    # If template exposes FrontendInstanceIds (CSV), use them
+    if 'FrontendInstanceIds' in out:
+        frontend_ids = [x for x in out['FrontendInstanceIds'].split(',') if x]
+    # If template exposes an AutoScalingGroup name, query ASG for instances
+    elif 'FrontendAutoScalingGroupName' in out:
+        asg_name = out['FrontendAutoScalingGroupName']
+        resp = aws(config, 'autoscaling', 'describe-auto-scaling-groups', {'AutoScalingGroupNames': [asg_name]})
+        groups = resp.get('AutoScalingGroups', [])
+        if groups:
+            frontend_ids = [inst['InstanceId'] for inst in groups[0].get('Instances', [])]
+    # Fallback to single FrontendInstanceId if present
+    elif 'FrontendInstanceId' in out:
+        frontend_ids = [out['FrontendInstanceId']]
+
+    wait_ssm(config, [out[key] for key in ['DatabaseInstanceId', 'BackendInstanceId']] + frontend_ids)
     return remote, out
 
 
@@ -228,12 +244,29 @@ def deployment_request(config, schema_path):
     remote, out = deployment_context(config)
     package = package_sources(schema_path)
     steps = []
-    for component, key in [('database', 'DatabaseInstanceId'), ('backend', 'BackendInstanceId'), ('frontend', 'FrontendInstanceId')]:
-        steps.append({'component': component, 'instanceId': out[key],
-                      'commands': remote_commands(component, remote, package)})
+    # database and backend single-instance steps
+    for component, key in [('database', 'DatabaseInstanceId'), ('backend', 'BackendInstanceId')]:
+        steps.append({'component': component, 'instanceId': out[key], 'commands': remote_commands(component, remote, package)})
+    # frontend: may be multiple instances
+    # Resolve frontend instance ids similarly to deployment_context
+    frontend_ids = []
+    if 'FrontendInstanceIds' in out:
+        frontend_ids = [x for x in out['FrontendInstanceIds'].split(',') if x]
+    elif 'FrontendAutoScalingGroupName' in out:
+        asg_name = out['FrontendAutoScalingGroupName']
+        resp = aws(config, 'autoscaling', 'describe-auto-scaling-groups', {'AutoScalingGroupNames': [asg_name]})
+        groups = resp.get('AutoScalingGroups', [])
+        if groups:
+            frontend_ids = [inst['InstanceId'] for inst in groups[0].get('Instances', [])]
+    elif 'FrontendInstanceId' in out:
+        frontend_ids = [out['FrontendInstanceId']]
+
+    for fid in frontend_ids:
+        steps.append({'component': 'frontend', 'instanceId': fid, 'commands': remote_commands('frontend', remote, package)})
     return {'region': config['region'], 'stackName': config['stack_name'],
             'generatedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            'frontendIp': out['FrontendPublicIp'], 'athenaEnabled': config['athena_enabled'], 'steps': steps}
+            'frontendIp': out.get('FrontendPublicIp', out.get('FrontendLoadBalancerDnsName', '')),
+            'athenaEnabled': config['athena_enabled'], 'steps': steps}
 
 
 def send_and_wait(config, step):
