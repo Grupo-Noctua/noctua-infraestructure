@@ -63,20 +63,22 @@ def main():
         'plan': xml_response('CreateChangeSet', {'Id': 'change-id', 'StackId': 'stack-id'}),
         'changeset': xml_response('DescribeChangeSet', {'Status': 'CREATE_COMPLETE', 'ExecutionStatus': 'AVAILABLE'}),
         'execute': xml_response('ExecuteChangeSet', {}),
-        'stack': xml_response('DescribeStacks', {'Stacks': {'member': fixture.app_stack()}}),
+        'stack': xml_response('DescribeStacks', {'Stacks': {'member': fixture.asg_stack()}}),
         'execution': xml_response('DescribeChangeSet', {'ExecutionStatus': 'EXECUTE_COMPLETE'}),
-        'collect': xml_response('DescribeStacks', {'Stacks': {'member': fixture.app_stack()}}),
+        'collect': xml_response('DescribeStacks', {'Stacks': {'member': fixture.asg_stack()}}),
+        'frontends': xml_response('DescribeAutoScalingGroups',
+            fixture.asg_response()['DescribeAutoScalingGroupsResponse']['DescribeAutoScalingGroupsResult']),
     }
     if args.scenario != 'create':
-        responses['inspect'] = xml_response('DescribeStacks', {'Stacks': {'member': fixture.app_stack()}})
+        responses['inspect'] = xml_response('DescribeStacks', {'Stacks': {'member': fixture.asg_stack()}})
     if args.scenario == 'unchanged':
         responses['changeset'] = xml_response('DescribeChangeSet', {
             'Status': 'FAILED', 'StatusReason': "The submitted information didn't contain changes."})
         responses['cleanup'] = xml_response('DeleteChangeSet', {})
     inspect_status = 400 if args.scenario == 'create' else 200
     mocks = {
-        'CloudFormation API': 'const responses = ' + json.dumps(responses) + '; const inspectStatus = ' + str(inspect_status) + """;
-if (!responses[$json.phase]) throw new Error('Unexpected CloudFormation phase: ' + $json.phase);
+        'CloudFormation and Auto Scaling API': 'const responses = ' + json.dumps(responses) + '; const inspectStatus = ' + str(inspect_status) + """;
+if (!responses[$json.phase]) throw new Error('Unexpected AWS Query phase: ' + $json.phase);
 return [{json: {statusCode: $json.phase === 'inspect' ? inspectStatus : 200, body: responses[$json.phase]}}];
 """,
         'SSM infrastructure API': """
@@ -103,8 +105,10 @@ return [{json: {statusCode: 200, body: {CommandId: $json.commandId,
         if node['name'] in mocks:
             if args.http:
                 parameters = node['parameters']
-                service = 'cloudformation' if node['id'] == 'application-cfn' else 'ssm'
-                parameters['url'] = f'http://{service}.us-east-1.amazonaws.com:8765/' + node['id']
+                if node['id'] == 'application-cfn':
+                    parameters['url'] = "={{ 'http://' + $json.api.service + '.us-east-1.amazonaws.com:8765/application-cfn' }}"
+                else:
+                    parameters['url'] = 'http://ssm.us-east-1.amazonaws.com:8765/' + node['id']
                 node['credentials'] = {'aws': {'id': 'offline-aws', 'name': 'Offline dummy AWS'}}
                 parameters['sendHeaders'] = True
                 parameters.setdefault('headerParameters', {'parameters': []})['parameters'].append({
@@ -123,7 +127,8 @@ return [{json: {statusCode: 200, body: {CommandId: $json.commandId,
         'type': 'n8n-nodes-base.code', 'typeVersion': 2, 'position': [2400, 820],
         'parameters': {'jsCode': 'const action = ' + json.dumps(args.scenario.upper()) + """;
 if ($json.status !== 'DEPLOY_VALIDATED' || $json.infrastructure.action !== action ||
-    $json.frontendUrl !== 'http://203.0.113.10' || $json.components.length !== 3 ||
+    $json.frontendUrl !== 'http://noctua-alb.us-east-1.elb.amazonaws.com' || $json.components.length !== 4 ||
+    new Set($json.components.map(item => item.instanceId)).size !== 4 ||
     $json.components.some(item => item.pollCount !== 2 || item.status !== 'Success')) {
   throw new Error('Offline workflow result is incorrect');
 }
@@ -165,14 +170,20 @@ http.createServer(async (req, res) => {
     const context = JSON.parse(req.headers['x-noctua-fixture']);
     assert.equal(req.method, 'POST');
     const cloudformation = id === 'application-cfn';
-    const service = cloudformation ? 'cloudformation' : 'ssm';
+    const service = cloudformation ? (context.phase === 'frontends' ? 'autoscaling' : 'cloudformation') : 'ssm';
     assert.ok(req.headers.authorization.includes('/us-east-1/' + service + '/aws4_request'));
     assert.equal(req.headers['x-amz-security-token'], 'offline-test-session');
     if (cloudformation) {
       // n8n's default Accept prefers JSON even when Response Format is Text.
       assert.equal(req.headers.accept, 'application/xml');
       assert.match(req.headers['content-type'], /^application\/x-www-form-urlencoded/);
-      assert.ok(new URLSearchParams(text).get('Action'));
+      const query = new URLSearchParams(text);
+      assert.ok(query.get('Action'));
+      if (service === 'autoscaling') {
+        assert.equal(query.get('Action'), 'DescribeAutoScalingGroups');
+        assert.equal(query.get('Version'), '2011-01-01');
+        assert.equal(query.get('AutoScalingGroupNames.member.1'), 'noctua-frontends');
+      }
     } else {
       assert.match(req.headers['content-type'], /^application\/x-amz-json-1\.1/);
       assert.match(req.headers['x-amz-target'], /^AmazonSSM\./);
@@ -204,6 +215,7 @@ http.createServer(async (req, res) => {
                       'n8n import:credentials --input=/files/credentials.json && ' + launch)
         command = ['docker', 'run', '--rm', '--network', 'none',
                    '--add-host', 'cloudformation.us-east-1.amazonaws.com:127.0.0.1',
+                   '--add-host', 'autoscaling.us-east-1.amazonaws.com:127.0.0.1',
                    '--add-host', 'ssm.us-east-1.amazonaws.com:127.0.0.1',
                    '--mount', f'type=bind,source={root},target=/files,readonly',
                    '-e', 'N8N_RESTRICT_FILE_ACCESS_TO=/files',

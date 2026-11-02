@@ -96,6 +96,46 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(db_rule['FromPort'], 3306)
         self.assertNotIn('EC2Database', load_template((ROOT / 'files/compute.yaml').read_text())['Resources'])
 
+    def test_every_asg_public_subnet_has_internet_access_for_bootstrap_and_ssm(self):
+        network = load_template((ROOT / 'files/network.yaml').read_text())
+        application_template = load_template((ROOT / 'files/application.yaml').read_text())
+        resources = network['Resources']
+        exports = {output['Export']['Name']: output['Value']['Ref']
+                   for output in network['Outputs'].values()}
+        associations = {resource['Properties']['SubnetId']['Ref']:
+                        resource['Properties']['RouteTableId']['Ref']
+                        for resource in resources.values()
+                        if resource['Type'] == 'AWS::EC2::SubnetRouteTableAssociation'}
+        public_tables = {resource['Properties']['RouteTableId']['Ref']
+                         for resource in resources.values()
+                         if resource['Type'] == 'AWS::EC2::Route'
+                         and resource['Properties'].get('DestinationCidrBlock') == '0.0.0.0/0'
+                         and resources.get(resource['Properties'].get('GatewayId', {}).get('Ref'), {}).get('Type')
+                         == 'AWS::EC2::InternetGateway'}
+        subnets = application_template['Resources']['FrontendAutoScalingGroup']['Properties']['VPCZoneIdentifier']
+        for subnet in subnets:
+            name = exports[subnet['Fn::ImportValue']]
+            with self.subTest(subnet=name):
+                self.assertTrue(resources[name]['Properties']['MapPublicIpOnLaunch'])
+                self.assertIn(name, associations, 'Public subnet needs an explicit internet route table association')
+                self.assertIn(associations[name], public_tables)
+
+    def test_application_security_groups_allow_alb_frontend_backend_path(self):
+        resources = load_template((ROOT / 'files/application.yaml').read_text())['Resources']
+        asg = resources['FrontendAutoScalingGroup']['Properties']
+        launch = resources[asg['LaunchTemplate']['LaunchTemplateId']['Ref']]['Properties']['LaunchTemplateData']
+        self.assertEqual(launch['SecurityGroupIds'], [{'Ref': 'FrontendSecurityGroup'}])
+        frontend_rules = resources['FrontendSecurityGroup']['Properties']['SecurityGroupIngress']
+        self.assertTrue(any(rule['FromPort'] == 80 and rule['ToPort'] == 80
+                            and rule.get('SourceSecurityGroupId') == {'Ref': 'LoadBalancerSecurityGroup'}
+                            for rule in frontend_rules))
+        backend_rules = resources['BackendSecurityGroup']['Properties']['SecurityGroupIngress']
+        self.assertTrue(any(rule['FromPort'] == 8080 and rule['ToPort'] == 8080
+                            and rule.get('SourceSecurityGroupId') == {'Ref': 'FrontendSecurityGroup'}
+                            for rule in backend_rules))
+        for name, group in [('EC2Backend', 'BackendSecurityGroup'), ('EC2DatabaseApp', 'DatabaseSecurityGroup')]:
+            self.assertEqual(resources[name]['Properties']['SecurityGroupIds'], [{'Ref': group}])
+
     def test_replanning_unexecuted_creation_does_not_use_update_parameters(self):
         current = {'StackStatus': 'REVIEW_IN_PROGRESS',
                    'Parameters': [{'ParameterKey': 'UbuntuAmi', 'ParameterValue': 'previous'}]}
@@ -227,6 +267,41 @@ const helpers = {getBinaryDataBuffer: async (index) => Buffer.from(entries[index
                                                             'AthenaWorkGroupName': 'noctua-athena-wg'},
                      applicationOutputs={item['OutputKey']: item['OutputValue']
                                          for item in self.app_stack()['Outputs']['member']})
+        return state
+
+    def asg_stack(self):
+        data = self.app_stack()
+        outputs = {item['OutputKey']: item['OutputValue'] for item in data['Outputs']['member']}
+        del outputs['FrontendInstanceId']
+        del outputs['FrontendPublicIp']
+        outputs.update(FrontendAutoScalingGroupName='noctua-frontends',
+                       FrontendLoadBalancerDnsName='noctua-alb.us-east-1.elb.amazonaws.com')
+        # Keep this fixture aligned with the real CloudFormation output contract.
+        template = load_template((ROOT / 'files/application.yaml').read_text())
+        self.assertEqual(set(outputs), set(template['Outputs']))
+        data['Outputs']['member'] = [{'OutputKey': key, 'OutputValue': value} for key, value in outputs.items()]
+        return data
+
+    def asg_response(self):
+        return {'DescribeAutoScalingGroupsResponse': {'DescribeAutoScalingGroupsResult': {
+            'AutoScalingGroups': {'member': {
+                'AutoScalingGroupName': 'noctua-frontends', 'DesiredCapacity': '2',
+                'Instances': {'member': [
+                    {'InstanceId': 'i-' + digit * 17, 'LifecycleState': 'InService', 'HealthStatus': 'Healthy'}
+                    for digit in ['c', 'e']]}}}}}}
+
+    def asg_state(self):
+        state = self.initial()
+        state['phase'] = 'collect'
+        result = self.infra(state, {'Stacks': {'member': self.asg_stack()}})
+        self.assertNotIn('error', result, result)
+        return result[0]['json']
+
+    def asg_ready_state(self):
+        state = self.infra(self.asg_state(), self.asg_response())[0]['json']
+        state = self.infra(state, {'InstanceInformationList': [
+            {'InstanceId': value, 'PingStatus': 'Online'} for value in state['instanceIds']]})[0]['json']
+        self.assertTrue(state['ready'])
         return state
 
     def infra(self, state, body, status=200):
@@ -416,6 +491,114 @@ const helpers = {getBinaryDataBuffer: async (index) => Buffer.from(entries[index
         self.assertIn('gzip.decompress', commands[6])
         self.assertLess(len(json.dumps({'commands': commands}).encode()), 64000)
 
+    def test_asg_outputs_discover_frontends_through_aws_query_api(self):
+        state = self.asg_state()
+        self.assertEqual(state['phase'], 'frontends')
+        request = self.run_code('Prepare infrastructure request', state)[0]['json']
+        self.assertEqual(request['api']['service'], 'autoscaling')
+        self.assertEqual(parse_qs(request['api']['body']), {
+            'Action': ['DescribeAutoScalingGroups'], 'Version': ['2011-01-01'],
+            'AutoScalingGroupNames.member.1': ['noctua-frontends']})
+        route = self.nodes['Use AWS Query API']['parameters']['conditions']['conditions'][0]['leftValue']
+        url = self.nodes['CloudFormation and Auto Scaling API']['parameters']['url']
+        # Evaluate the actual n8n expressions, including the routing branch.
+        for expression, expected in [(route, True), (url, 'https://autoscaling.us-east-1.amazonaws.com/')]:
+            result = subprocess.check_output(['node', '-e',
+                'const x=JSON.parse(process.argv[1]); const $json=x.state; '
+                'console.log(JSON.stringify(eval(x.expression)));',
+                json.dumps({'state': request, 'expression': expression[3:-2]})], text=True)
+            self.assertEqual(json.loads(result), expected)
+        state = self.infra(state, self.asg_response())[0]['json']
+        self.assertEqual(state['phase'], 'online')
+        self.assertEqual(state['frontendInstanceIds'], ['i-' + digit * 17 for digit in ['c', 'e']])
+        ssm = self.run_code('Prepare infrastructure request', state)[0]['json']['api']
+        self.assertEqual(ssm['service'], 'ssm')
+        self.assertEqual(json.loads(ssm['body'])['Filters'][0]['Values'], state['instanceIds'])
+        self.assertEqual(len(state['instanceIds']), 4)
+
+    def test_asg_discovery_waits_for_capacity_health_and_pagination(self):
+        state = self.asg_state()
+        for mutation in ['empty', 'pending', 'unhealthy', 'partial']:
+            response = self.asg_response()['DescribeAutoScalingGroupsResponse']['DescribeAutoScalingGroupsResult']
+            group = response['AutoScalingGroups']['member']
+            if mutation == 'empty':
+                response['AutoScalingGroups'] = ''
+            elif mutation == 'pending':
+                group['Instances']['member'][0]['LifecycleState'] = 'Pending'
+            elif mutation == 'unhealthy':
+                group['Instances']['member'][0]['HealthStatus'] = 'Unhealthy'
+            else:
+                group['Instances']['member'].pop()
+            result = self.infra(state, response)[0]['json']
+            self.assertEqual(result['phase'], 'frontends')
+            self.assertEqual(result['waitSeconds'], 10)
+            self.assertEqual(result['deadline'], state['deadline'])
+            self.assertFalse(result['ready'])
+        state = self.infra(state, {'AutoScalingGroups': '', 'NextToken': 'next-group'})[0]['json']
+        request = self.run_code('Prepare infrastructure request', state)[0]['json']['api']
+        self.assertEqual(parse_qs(request['body'])['NextToken'], ['next-group'])
+        state = self.infra(state, self.asg_response())[0]['json']
+        self.assertEqual(state['phase'], 'online')
+        self.assertNotIn('nextToken', state)
+
+    def test_asg_discovery_rejects_wrong_group_invalid_ids_and_aws_errors(self):
+        state = self.asg_state()
+        for mutation in ['wrong-group', 'duplicate', 'invalid', 'zero-capacity']:
+            response = self.asg_response()
+            group = response['DescribeAutoScalingGroupsResponse']['DescribeAutoScalingGroupsResult']['AutoScalingGroups']['member']
+            if mutation == 'wrong-group':
+                group['AutoScalingGroupName'] = 'other-stack'
+            elif mutation == 'zero-capacity':
+                group['DesiredCapacity'] = '0'
+            else:
+                group['Instances']['member'][0]['InstanceId'] = 'i-' + 'b' * 17 if mutation == 'duplicate' else 'invalid'
+            self.assertIn('error', self.infra(state, response))
+        self.assertIn('AccessDenied', self.infra(state, {'ErrorResponse': {
+            'Error': {'Code': 'AccessDenied', 'Message': 'denied'}}}, 403)['error'])
+        retry = self.infra(state, {}, 503)[0]['json']
+        self.assertEqual(retry['phase'], 'frontends')
+        self.assertEqual(retry['waitSeconds'], 10)
+        state['deadline'] = 0
+        self.assertIn('timeout', self.run_code('Prepare infrastructure request', state)['error'])
+
+    def test_asg_ssm_waits_for_every_frontend_and_refreshes_replaced_instances(self):
+        state = self.infra(self.asg_state(), self.asg_response())[0]['json']
+        deadline = state['deadline']
+        ids = state['instanceIds']
+        state = self.infra(state, {'InstanceInformationList': [
+            {'InstanceId': value, 'PingStatus': 'Online'} for value in ids[:-1]], 'NextToken': 'ssm-page2'})[0]['json']
+        self.assertFalse(state['ready'])
+        state = self.infra(state, {'InstanceInformationList': []})[0]['json']
+        self.assertEqual(state['phase'], 'frontends')
+        self.assertEqual(state['onlineIds'], [])
+        response = self.asg_response()
+        group = response['DescribeAutoScalingGroupsResponse']['DescribeAutoScalingGroupsResult']['AutoScalingGroups']['member']
+        replacement = 'i-' + 'f' * 17
+        group['Instances']['member'][1]['InstanceId'] = replacement
+        state = self.infra(state, response)[0]['json']
+        self.assertNotIn(ids[-1], state['instanceIds'])
+        self.assertIn(replacement, state['instanceIds'])
+        self.assertEqual(state['deadline'], deadline)
+        state = self.infra(state, {'InstanceInformationList': [
+            {'InstanceId': value, 'PingStatus': 'Online'} for value in state['instanceIds']]})[0]['json']
+        self.assertTrue(state['ready'])
+
+    def test_asg_deploy_uses_alb_url_and_rejects_undiscovered_frontends(self):
+        ready = self.asg_ready_state()
+        state = self.run_code('Build deployment request', ready)[0]['json']
+        self.assertEqual(state['frontendUrl'], 'http://noctua-alb.us-east-1.elb.amazonaws.com')
+        self.assertEqual([step['component'] for step in state['steps']], ['database', 'backend', 'frontend', 'frontend'])
+        self.assertEqual([step['instanceId'] for step in state['steps']], ready['instanceIds'])
+        self.assertNotIn('frontendIp', state)
+        del ready['frontendInstanceIds']
+        self.assertIn('deployment instance IDs', self.run_code('Build deployment request', ready)['error'])
+        data = self.asg_stack()
+        data['Outputs']['member'] = [item for item in data['Outputs']['member']
+                                   if item['OutputKey'] != 'FrontendLoadBalancerDnsName']
+        state = self.initial()
+        state['phase'] = 'collect'
+        self.assertIn('FrontendLoadBalancerDnsName', self.infra(state, {'Stacks': {'member': data}})['error'])
+
     def test_generated_unpack_command_preserves_source_bytes(self):
         files = self.input_files()
         files['script-noctua.sql'] = "-- UTF-8: aplicação\r\nSELECT 'quoted';\r\n"
@@ -479,8 +662,14 @@ const helpers = {getBinaryDataBuffer: async (index) => Buffer.from(entries[index
         self.assertFalse(self.nodes['Send SSM command']['retryOnFail'])
 
     def test_three_component_deploy_preserves_results_across_polling_and_step_loops(self):
-        context = self.run_code('Build deployment request', self.ready_state())[0]['json']
-        for index, component in enumerate(['database', 'backend', 'frontend']):
+        self.check_deployment_loop(self.ready_state(), ['database', 'backend', 'frontend'])
+
+    def test_asg_deploy_requires_success_for_both_frontend_instances(self):
+        self.check_deployment_loop(self.asg_ready_state(), ['database', 'backend', 'frontend', 'frontend'])
+
+    def check_deployment_loop(self, ready, components):
+        context = self.run_code('Build deployment request', ready)[0]['json']
+        for index, component in enumerate(components):
             context = self.run_code('Select step', context)[0]['json']
             self.assertEqual(context['step']['component'], component)
             self.assertFalse(context['done'])
@@ -501,16 +690,19 @@ const helpers = {getBinaryDataBuffer: async (index) => Buffer.from(entries[index
             context = self.run_code('Advance step', context)[0]['json']
             self.assertEqual(context['stepIndex'], index + 1)
             self.assertEqual(len(context['results']), index + 1)
-            if index < 2:
+            if index < len(components) - 1:
                 self.assertIn('error', self.run_code('Deployment result', context))
         result = self.run_code('Deployment result', context)[0]['json']
         self.assertEqual(result['status'], 'DEPLOY_VALIDATED')
         self.assertEqual(result['athenaValidated'], configuration()['athena_enabled'])
         self.assertNotIn('steps', result)
-        self.assertEqual([item['component'] for item in result['components']], ['database', 'backend', 'frontend'])
+        self.assertEqual([item['component'] for item in result['components']], components)
         for item in result['components']:
             self.assertEqual(item['standardOutput'], item['component'] + ' validated')
             self.assertEqual(item['pollCount'], 3)
+        # A duplicated success from another frontend cannot complete the deployment.
+        context['results'][-1]['instanceId'] = context['results'][-2]['instanceId']
+        self.assertIn('incomplete', self.run_code('Deployment result', context)['error'])
 
 
 if __name__ == '__main__':

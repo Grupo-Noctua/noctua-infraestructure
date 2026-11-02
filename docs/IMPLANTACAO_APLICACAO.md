@@ -86,7 +86,7 @@ mantém o laboratório ligado.
 No n8n, crie **uma credencial AWS** na região `us-east-1`, habilite credenciais
 temporárias/session token e preencha o mesmo conjunto. Se a versão instalada não
 oferecer session token, use o deploy CLI até atualizar/configurar um método compatível.
-Associe essa credencial aos quatro nós HTTP AWS do novo workflow: **CloudFormation API**,
+Associe essa credencial aos quatro nós HTTP AWS do novo workflow: **CloudFormation and Auto Scaling API**,
 **SSM infrastructure API**, **Send SSM command** e **Get SSM status**. Sua atualização
 centralizada vale para todos; ela não é atualizada automaticamente pelo perfil CLI.
 
@@ -307,7 +307,7 @@ aguarda as EC2s e implanta banco → backend → frontend. Não exige `prepare`,
    executar o Compose. A pasta deve conter `script-noctua.sql`. O Code node precisa
    de `crypto,zlib`, já liberados por `NODE_FUNCTION_ALLOW_BUILTIN` no Compose.
 5. Importe o JSON atualizado `application-n8n-noctua.json`.
-6. Selecione a mesma credencial AWS em **CloudFormation API**, **SSM infrastructure API**,
+6. Selecione a mesma credencial AWS em **CloudFormation and Auto Scaling API**, **SSM infrastructure API**,
    **Send SSM command** e **Get SSM status**. Use `us-east-1` e os três valores da sessão atual.
 7. Execute **Start application deploy**.
 
@@ -323,8 +323,10 @@ aguarda as EC2s e implanta banco → backend → frontend. Não exige `prepare`,
    houver mudanças, remove apenas o change set vazio e reutiliza a stack.
 5. Aguarda tanto a conclusão da stack quanto a execução do change set. Estados de
    rollback/falha interrompem o fluxo. O limite da operação da stack é 40 minutos.
-6. Consulta os outputs atuais e aguarda as três EC2s `Online` no SSM, até 20 minutos.
-7. Monta os comandos com os IDs/IPs atuais e implanta banco → backend → frontend.
+6. Consulta os outputs atuais e usa `FrontendAutoScalingGroupName` para descobrir os
+   frontends via `DescribeAutoScalingGroups`. Aguarda a capacidade desejada em
+   `InService`/`Healthy` e todas as EC2s `Online` no SSM, até 20 minutos no total.
+7. Monta os comandos com os IDs/IPs atuais e implanta banco → backend → cada frontend.
    O script remoto também aguarda `/opt/noctua/bootstrap-ready` antes de implantar.
 
 O workflow espera 10 segundos **entre consultas**, não como critério de sucesso.
@@ -334,8 +336,9 @@ Credenciais inválidas, acesso negado, falhas de transporte e falhas remotas int
 a execução. O envio SSM e a criação/execução do change set não são repetidos automaticamente
 após respostas ambíguas: confira o histórico AWS antes de reiniciar.
 
-O nó **Deployment result** retorna `DEPLOY_VALIDATED` somente após validar as três
-etapas. A saída inclui stack, região, `frontendUrl`, duração, `athenaValidated`,
+O nó **Deployment result** retorna `DEPLOY_VALIDATED` somente após validar todas as
+instâncias (quatro etapas para banco, backend e dois frontends). A saída inclui stack,
+região, `frontendUrl` com o DNS do ALB em HTTP (ou domínio configurado em HTTPS), duração, `athenaValidated`,
 `infrastructure.action` (`CREATE`, `UPDATE` ou `UNCHANGED`) e `components`, com os IDs
 das instâncias/comandos, estados e saídas SSM. Os digests aparecem na saída remota.
 Os logs estão sujeitos aos limites de tamanho do SSM. Esse resultado representa os
@@ -355,7 +358,7 @@ No n8n 2.43.4, o HTTP Request com corpo `Raw` pode receber a resposta como um st
 `IncomingMessage`. Ao forçar a resposta para `Text`, o nó tenta serializar esse stream,
 que contém referências circulares entre resposta, socket e requisição.
 
-O workflow usa **Form URLencoded / Using Single Field** no **CloudFormation API**, com
+O workflow usa **Form URLencoded / Using Single Field** no **CloudFormation and Auto Scaling API**, com
 header `Accept: application/xml`, resposta **Text**, campo de saída `body` e
 **Include Response Headers and Status** ligado. O header é necessário porque o `Accept`
 padrão do n8n prioriza JSON mesmo com resposta **Text**; sem ele, um retorno como
@@ -366,6 +369,16 @@ Os três nós SSM usam corpo **JSON / Using JSON**, header
 
 Reimporte `application-n8n-noctua.json` e reassocie a credencial AWS aos quatro nós.
 Alterar o arquivo no repositório não atualiza a cópia já importada no editor.
+
+### Erro `Missing stack output: FrontendInstanceId`
+
+O template com Auto Scaling Group fornece `FrontendAutoScalingGroupName` e
+`FrontendLoadBalancerDnsName`, em vez de um ID/IP fixo de frontend. Reimporte o
+`application-n8n-noctua.json` atualizado, reassocie as credenciais dos quatro nós HTTP
+e inicie uma nova execução em **Start application deploy**. O workflow consulta os
+IDs no Auto Scaling, implanta cada frontend e retorna a URL do load balancer.
+Uma execução antiga mantém o código anterior; retomar somente o nó que falhou não
+aplica a atualização do workflow.
 
 Para validar os nós HTTP reais sem acessar a AWS:
 

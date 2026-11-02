@@ -5,7 +5,6 @@
 infra/application.local.json
 infra/application-deployment.json
 infra/application-workflow.generated.json
-files/application.local.json
 files/application-deployment.json
 files/application-workflow.generated.json
 .venv/

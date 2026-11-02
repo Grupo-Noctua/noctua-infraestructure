@@ -36,8 +36,8 @@ Resources:
       GroupDescription: Noctua frontend HTTP and HTTPS
       VpcId: !ImportValue VPC-ID
       SecurityGroupIngress:
-        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref FrontendIngressCidr}
-        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref FrontendIngressCidr}
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup}
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -55,7 +55,7 @@ Resources:
         - IpProtocol: tcp
           FromPort: 8080
           ToPort: 8080
-          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+          SourceSecurityGroupId: !Ref FrontendSecurityGroup
   DatabaseSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -72,6 +72,7 @@ Resources:
     Properties:
       LaunchTemplateData:
         ImageId: !Ref UbuntuAmi
+        InstanceType: !Ref FrontendInstanceType
         IamInstanceProfile:
           Name: !Ref InstanceProfileName
         MetadataOptions:
@@ -105,13 +106,54 @@ Resources:
             install -d -m 0700 /opt/noctua
             touch /opt/noctua/bootstrap-ready
 
-  # Frontends replaced by an Auto Scaling Group so CloudFormation manages target registration
+  # Keep frontend networking separate from the launch template used by the database/backend.
+  FrontendLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref UbuntuAmi
+        InstanceType: !Ref FrontendInstanceType
+        SecurityGroupIds: [!Ref FrontendSecurityGroup]
+        IamInstanceProfile:
+          Name: !Ref InstanceProfileName
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeSize: 16
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y docker.io curl unzip python3 rsync mysql-client
+            systemctl enable --now docker
+            work=$(mktemp -d)
+            trap 'rm -rf "$work"' EXIT
+            curl --fail --retry 5 -o "$work/aws.zip" https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+            unzip -q "$work/aws.zip" -d "$work"
+            "$work/aws/install" --update
+            if ! snap list amazon-ssm-agent >/dev/null 2>&1; then
+              snap install amazon-ssm-agent --classic
+            fi
+            snap start --enable amazon-ssm-agent
+            install -d -m 0700 /opt/noctua
+            touch /opt/noctua/bootstrap-ready
+
+  # CloudFormation manages target registration through the Auto Scaling Group.
   FrontendAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       LaunchTemplate:
-        LaunchTemplateId: !Ref ApplicationLaunchTemplate
-        Version: !GetAtt ApplicationLaunchTemplate.LatestVersionNumber
+        LaunchTemplateId: !Ref FrontendLaunchTemplate
+        Version: !GetAtt FrontendLaunchTemplate.LatestVersionNumber
       MinSize: '2'
       MaxSize: '2'
       DesiredCapacity: '2'

@@ -26,9 +26,10 @@ Para executar:
 2. Garanta a rede-base, a saída NAT, o instance profile e os parâmetros SecureString.
 3. Execute `docker compose up -d --build` para aplicar os volumes e as permissões do Code node.
 4. Importe `application-n8n-noctua.json` e selecione a mesma credencial AWS temporária
-   nos nós **CloudFormation API**, **SSM infrastructure API**, **Send SSM command** e **Get SSM status**.
+   nos nós **CloudFormation and Auto Scaling API**, **SSM infrastructure API**, **Send SSM command** e **Get SSM status**.
 5. Execute **Start application deploy**. O workflow aplica o change set automaticamente,
-   aguarda CloudFormation/SSM e implanta banco → backend → frontend.
+   aguarda CloudFormation, descobre os frontends do Auto Scaling Group, aguarda todas
+   as instâncias no SSM e implanta banco → backend → cada frontend.
 
 Com Athena habilitado, o processamento Silver e o crawler devem ter concluído antes
 do deploy. A saída `DEPLOY_VALIDATED` inclui a URL e o resultado de cada componente.
