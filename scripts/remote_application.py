@@ -270,8 +270,20 @@ def smoke(config, component):
     else:
         server = config['server_name'] if config.get('tls_parameter') else None
         base = f'https://{server}' if server else 'http://127.0.0.1'
-        if '<html' not in fetch(base, '/', server).lower():
+        html = fetch(base, '/', server)
+        if '<html' not in html.lower():
             raise RuntimeError('Frontend did not return HTML')
+        scripts = re.findall(r'src="(/assets/[^"?]+\.js)"', html)
+        if not scripts:
+            raise RuntimeError('Frontend HTML does not reference a JavaScript bundle')
+        for script in scripts:
+            args = ['curl', '--fail', '--silent', '--show-error', '--max-time', '15', '--noproxy', '*',
+                    '-o', '/dev/null', '-w', '%{content_type}']
+            if server:
+                args += ['--resolve', f'{server}:443:127.0.0.1']
+            content_type = run(*args, base + script).stdout.strip().split(';')[0]
+            if content_type not in {'application/javascript', 'text/javascript'}:
+                raise RuntimeError('Frontend JavaScript bundle has an invalid MIME type')
     routes = JDBC_ROUTES + (ATHENA_ROUTES if config['athena_enabled'] else [])
     for route in routes:
         result = json.loads(fetch(base, '/api/dashboard/' + route, server))
@@ -321,7 +333,18 @@ def nginx_configuration(upstream, server_name='_', tls=False):
         proxy_connect_timeout 5s;
         proxy_read_timeout 60s;
     }}
-    location / {{ try_files $uri $uri/ /index.html; }}
+    location ^~ /assets/ {{
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }}
+    location = /index.html {{
+        add_header Cache-Control "no-store" always;
+        try_files $uri =404;
+    }}
+    location / {{
+        add_header Cache-Control "no-store" always;
+        try_files $uri $uri/ /index.html;
+    }}
 '''
     if not tls:
         return f'server {{ listen 8080; server_name {server_name};\n{locations}\n}}\n'
@@ -342,6 +365,45 @@ server {{
 '''
 
 
+def merge_frontend_assets(source, destination):
+    """Retain hashed assets without rewriting files that browsers may be reading."""
+    destination.mkdir(parents=True, exist_ok=True)
+    destination.chmod(0o755)
+    for path in source.rglob('*'):
+        target = destination / path.relative_to(source)
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            target.chmod(0o755)
+        elif path.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                if hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256(path.read_bytes()).digest():
+                    raise RuntimeError(f'Immutable frontend asset collision: {path.name}')
+                continue
+            shutil.copyfile(path, target)
+            target.chmod(0o644)
+
+
+def prepare_frontend_assets(config):
+    image = config['frontend_image']
+    pull_image(config, image)
+    images = {image}
+    # Bootstrap retention from releases already present on this EC2.
+    for row in run('docker', 'image', 'ls', '--digests', '--format', '{{.Repository}} {{.ID}}').stdout.splitlines():
+        repository, image_id = row.split()
+        if repository.rsplit('/', 1)[-1] == 'noctua-frontend':
+            images.add(image_id)
+    for existing_image in sorted(images):
+        container = run('docker', 'create', existing_image).stdout.strip()
+        try:
+            with tempfile.TemporaryDirectory(prefix='frontend-assets-', dir=ROOT) as directory:
+                run('docker', 'cp', f'{container}:/usr/share/nginx/html/assets', directory)
+                merge_frontend_assets(Path(directory) / 'assets', ROOT / 'frontend-assets')
+        finally:
+            run('docker', 'rm', container, check=False)
+    print('Frontend assets staged; previous hashed assets retained', flush=True)
+
+
 def frontend_options(config):
     tls = bool(config.get('tls_parameter'))
     options = ['-p', '80:8080', '-e', 'NGINX_ENVSUBST_TEMPLATE_DIR=/nonexistent']
@@ -356,7 +418,8 @@ def frontend_options(config):
         options += ['-p', '443:8443', '-v', f'{directory}:/etc/noctua-tls:ro']
     path = ROOT / 'frontend.conf'
     write_private(path, nginx_configuration(config['backend_private_ip'], config['server_name'], tls))
-    options += ['-v', f'{path}:/etc/nginx/conf.d/default.conf:ro']
+    options += ['-v', f'{path}:/etc/nginx/conf.d/default.conf:ro',
+                '-v', f'{ROOT / "frontend-assets"}:/usr/share/nginx/html/assets:ro']
     return options
 
 
@@ -384,7 +447,10 @@ def wait_smoke(config, component):
 
 def deploy(config, component):
     image = config[f'{component}_image']
-    pull_image(config, image)
+    if component == 'frontend':
+        prepare_frontend_assets(config)
+    else:
+        pull_image(config, image)
     options = backend_options(config) if component == 'backend' else frontend_options(config)
     if component == 'frontend':
         run('docker', 'run', '--rm',
@@ -416,7 +482,7 @@ def deploy(config, component):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['database', 'backend', 'frontend', 'backup', 'verify-backend', 'verify-frontend'])
+    parser.add_argument('action', choices=['database', 'backend', 'frontend-assets', 'frontend', 'backup', 'verify-backend', 'verify-frontend'])
     parser.add_argument('config', type=Path)
     args = parser.parse_args()
     if os.geteuid() != 0:
@@ -434,6 +500,8 @@ def main():
             wait_bootstrap()
             if args.action == 'database':
                 bootstrap_database(config, Path(__file__).with_name('schema.sql'))
+            elif args.action == 'frontend-assets':
+                prepare_frontend_assets(config)
             elif args.action.startswith('verify-'):
                 component = args.action.removeprefix('verify-')
                 state = json.loads((ROOT / f'{component}-release.json').read_text())

@@ -43,6 +43,10 @@ Navegador -> EC2 frontend / Nginx (subnet pública, EIP)
 - `LabInstanceProfile` disponível e permitido. Não há criação de roles IAM nesta entrega.
 - Instâncias padrão `t3.small`; altere para tipos permitidos pelo laboratório.
 
+O CLI (`deploy` e `prepare`) usa por padrão `files/database/script-noctua.sql`,
+o mesmo arquivo montado no n8n. Esse SQL cria as tabelas e inclui os dados de exemplo
+na inicialização do banco. Para usar outro arquivo, informe `--schema CAMINHO`.
+
 A identidade de implantação precisa de CloudFormation (incluindo change sets), EC2,
 S3 e associação do instance profile. Para preparar/executar releases, também precisa
 de `ssm:DescribeInstanceInformation`, `ssm:SendCommand` e `ssm:GetCommandInvocation`.
@@ -301,10 +305,10 @@ aguarda as EC2s e implanta banco → backend → frontend. Não exige `prepare`,
    |---|---|
    | `./files` | `/files` |
    | `./scripts` | `/files/scripts` (somente leitura) |
-   | `../noctua-backend/database` | `/files/database` (somente leitura) |
+   | `./files/database` | `/files/database` (somente leitura) |
 
-   Se o backend estiver em outro local, defina `NOCTUA_SCHEMA_DIRECTORY` antes de
-   executar o Compose. A pasta deve conter `script-noctua.sql`. O Code node precisa
+   Para usar outro SQL no n8n, ajuste a origem do volume `/files/database` no
+   `docker-compose.yml`. A pasta deve conter `script-noctua.sql`. O Code node precisa
    de `crypto,zlib`, já liberados por `NODE_FUNCTION_ALLOW_BUILTIN` no Compose.
 5. Importe o JSON atualizado `application-n8n-noctua.json`.
 6. Selecione a mesma credencial AWS em **CloudFormation and Auto Scaling API**, **SSM infrastructure API**,

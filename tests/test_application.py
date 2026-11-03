@@ -73,7 +73,7 @@ class ApplicationTests(unittest.TestCase):
 
     def test_role_secrets_not_embedded_in_remote_package(self):
         config = configuration()
-        package = application.package_sources(ROOT.parent / 'noctua-backend/database/script-noctua.sql')
+        package = application.package_sources(application.DEFAULT_SCHEMA)
         with tarfile.open(fileobj=io.BytesIO(package), mode='r:gz') as archive:
             self.assertEqual(set(archive.getnames()), {'schema.sql', 'remote_application.py'})
         commands = application.remote_commands('backend', config, package)
@@ -175,6 +175,44 @@ class ApplicationTests(unittest.TestCase):
         self.assertIn('listen 8443 ssl;', config)
         with self.assertRaises(ValueError):
             remote.nginx_configuration('10.0.2.10', 'example.com; return 200;')
+
+    def test_assets_survive_release_changes_and_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old, new, shared = root / 'old', root / 'new', root / 'shared'
+            old.mkdir()
+            new.mkdir()
+            (old / 'index-old.js').write_text('old bundle')
+            (new / 'index-new.js').write_text('new bundle')
+            remote.merge_frontend_assets(old, shared)
+            remote.merge_frontend_assets(new, shared)
+            remote.merge_frontend_assets(old, shared)
+            self.assertEqual((shared / 'index-old.js').read_text(), 'old bundle')
+            self.assertEqual((shared / 'index-new.js').read_text(), 'new bundle')
+            (new / 'index-old.js').write_text('different content with the same hash')
+            with self.assertRaisesRegex(RuntimeError, 'asset collision'):
+                remote.merge_frontend_assets(new, shared)
+            self.assertEqual((shared / 'index-old.js').read_text(), 'old bundle')
+
+    def test_all_frontends_receive_assets_before_new_html_is_deployed(self):
+        out = {'DatabaseInstanceId': 'i-db', 'BackendInstanceId': 'i-api',
+               'FrontendInstanceIds': 'i-web1,i-web2', 'FrontendPublicIp': 'test'}
+        with patch.object(application, 'deployment_context', return_value=(configuration(), out)), \
+                patch.object(application, 'package_sources', return_value=b'package'), \
+                patch.object(application, 'remote_commands', side_effect=lambda action, config, package: [action]):
+            request = application.deployment_request(configuration(), Path('schema.sql'))
+        self.assertEqual([(step['component'], step['instanceId']) for step in request['steps']], [
+            ('database', 'i-db'), ('backend', 'i-api'),
+            ('frontend-assets', 'i-web1'), ('frontend-assets', 'i-web2'),
+            ('frontend', 'i-web1'), ('frontend', 'i-web2'),
+        ])
+
+    def test_frontend_smoke_rejects_html_served_as_javascript(self):
+        html = '<html><script type="module" src="/assets/index-test.js"></script></html>'
+        with patch.object(remote, 'fetch', return_value=html), \
+                patch.object(remote, 'run', return_value=Mock(stdout='text/html')):
+            with self.assertRaisesRegex(RuntimeError, 'invalid MIME'):
+                remote.smoke(configuration(), 'frontend')
 
     def test_failed_deploy_restores_previous_image_and_still_fails(self):
         import tempfile

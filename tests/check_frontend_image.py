@@ -73,8 +73,21 @@ def verify(image):
                 time.sleep(1)
         html = get('/').decode()
         assert '<html' in html.lower()
+        for path in ['/', '/index.html', '/projects/deep-link']:
+            with urllib.request.urlopen(base + path, timeout=15) as response:
+                assert response.headers.get('Cache-Control') == 'no-store'
         assert get('/projects/deep-link').decode() == html
         script = re.search(r'src="([^"]+\.js)"', html).group(1)
+        with urllib.request.urlopen(base + script, timeout=15) as response:
+            assert response.headers.get_content_type() in {'application/javascript', 'text/javascript'}
+            assert 'immutable' in response.headers.get('Cache-Control', '')
+        try:
+            get('/assets/nonexistent-bundle.js')
+        except urllib.error.HTTPError as error:
+            assert error.code == 404
+            assert error.read().decode() != html
+        else:
+            raise AssertionError('Missing JavaScript must return 404, never SPA HTML with HTTP 200')
         javascript = get(script).decode()
         document = re.search(r'/assets/DocumentacaoBase-Projetos-[a-zA-Z0-9_-]+\.docx', javascript).group(0)
         assert get(document).startswith(b'PK')
@@ -87,7 +100,7 @@ def verify(image):
             assert error.code in {502, 504}
         else:
             raise AssertionError('Unavailable API must not fall back to the SPA HTML')
-        print('PASS: HTML, SPA deep links, DOCX asset, /healthz, API prefix and upstream failure propagation')
+        print('PASS: HTML no-store, JavaScript MIME/cache, missing asset 404, SPA links, DOCX, health and API proxy')
     except Exception:
         for container in created:
             print(docker('inspect', '--format', '{{json .State}}', container))

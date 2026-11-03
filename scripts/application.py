@@ -22,6 +22,7 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SCHEMA = ROOT / 'files/database/script-noctua.sql'
 IMAGE_PATTERN = r'docker\.io/[a-z0-9_-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}'
 FINAL_STACK_FAILURES = {'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED', 'UPDATE_ROLLBACK_COMPLETE',
                         'UPDATE_ROLLBACK_FAILED', 'CREATE_FAILED', 'UPDATE_FAILED', 'DELETE_FAILED'}
@@ -225,7 +226,7 @@ def package_sources(schema_path):
 
 
 def remote_commands(action, config, package):
-    if action not in {'database', 'backend', 'frontend', 'verify-backend', 'verify-frontend'}:
+    if action not in {'database', 'backend', 'frontend-assets', 'frontend', 'verify-backend', 'verify-frontend'}:
         raise ValueError('Invalid remote action')
     encoded = base64.b64encode(package).decode()
     context = base64.b64encode(json.dumps(config).encode()).decode()
@@ -261,6 +262,10 @@ def deployment_request(config, schema_path):
     elif 'FrontendInstanceId' in out:
         frontend_ids = [out['FrontendInstanceId']]
 
+    # Every frontend must have the new assets before any node serves the new HTML.
+    for fid in frontend_ids:
+        steps.append({'component': 'frontend-assets', 'instanceId': fid,
+                      'commands': remote_commands('frontend-assets', remote, package)})
     for fid in frontend_ids:
         steps.append({'component': 'frontend', 'instanceId': fid, 'commands': remote_commands('frontend', remote, package)})
     return {'region': config['region'], 'stackName': config['stack_name'],
@@ -299,7 +304,7 @@ def send_and_wait(config, step):
 def retire_database_plan(config):
     # Require the new application infrastructure and a completed deployment before retiring the old EC2.
     remote, out = deployment_context(config)
-    package = package_sources(ROOT.parent / 'noctua-backend/database/script-noctua.sql')
+    package = package_sources(DEFAULT_SCHEMA)
     for component, key in [('backend', 'BackendInstanceId'), ('frontend', 'FrontendInstanceId')]:
         send_and_wait(config, {'component': 'verify-' + component, 'instanceId': out[key],
                               'commands': remote_commands('verify-' + component, remote, package)})
@@ -340,7 +345,8 @@ def main():
     apply.add_argument('--change-set', required=True)
     for name in ['prepare', 'deploy']:
         command = sub.add_parser(name)
-        command.add_argument('--schema', type=Path, default=ROOT.parent / 'noctua-backend/database/script-noctua.sql')
+        command.add_argument('--schema', type=Path, default=DEFAULT_SCHEMA,
+                             help='SQL bootstrap file (default: files/database/script-noctua.sql, includes sample data)')
     args = parser.parse_args()
     config = json.loads(args.config.read_text(encoding='utf-8-sig'))
     validate_config(config)
