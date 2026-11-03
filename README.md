@@ -4,11 +4,13 @@ Infraestrutura Noctua em CloudFormation e automação n8n.
 
 ## Aplicação: MySQL, backend e frontend
 
-A nova camada usa três EC2s, imagens no **Docker Hub**, deploy via **SSM** e
+A camada de aplicação usa frontends em **ASG + ALB**, EC2s backend/MySQL, imagens no **Docker Hub**, deploy via **SSM** e
 credenciais da **role das instâncias**. A sessão temporária do AWS Academy é
 necessária para as operações de implantação no computador/n8n local.
 
 Consulte o [passo a passo de implantação](docs/IMPLANTACAO_APLICACAO.md).
+Para distinguir visualmente os nós, consulte [frontends A/B no load balancer](docs/FRONTENDS_LOAD_BALANCER.md).
+O parâmetro opcional `frontend_image_b` permite distribuir uma segunda imagem entre os frontends.
 
 - `files/application.yaml`: nova stack de aplicação.
 - `files/application.example.json`: configuração de referência; copie para `files/application.local.json` e preencha os valores locais.
@@ -29,7 +31,7 @@ Para executar:
    nos nós **CloudFormation and Auto Scaling API**, **SSM infrastructure API**, **Send SSM command** e **Get SSM status**.
 5. Execute **Start application deploy**. O workflow aplica o change set automaticamente,
    aguarda CloudFormation, descobre os frontends do Auto Scaling Group, aguarda todas
-   as instâncias no SSM e implanta banco → backend → cada frontend.
+    as instâncias no SSM e implanta banco → backend → assets em todos os frontends → cada frontend.
 
 Com Athena habilitado, o processamento Silver e o crawler devem ter concluído antes
 do deploy. A saída `DEPLOY_VALIDATED` inclui a URL e o resultado de cada componente.

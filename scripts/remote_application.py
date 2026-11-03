@@ -386,8 +386,9 @@ def merge_frontend_assets(source, destination):
 
 def prepare_frontend_assets(config):
     image = config['frontend_image']
-    pull_image(config, image)
-    images = {image}
+    images = set(config.get('frontend_asset_images', [])) | {image}
+    for active_image in sorted(images):
+        pull_image(config, active_image)
     # Bootstrap retention from releases already present on this EC2.
     for row in run('docker', 'image', 'ls', '--digests', '--format', '{{.Repository}} {{.ID}}').stdout.splitlines():
         repository, image_id = row.split()

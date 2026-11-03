@@ -19,6 +19,7 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import application
+import publish_images
 from cloudformation_yaml import load_template
 
 # Remote entrypoint is Linux-only; mock just the advisory lock module on Windows.
@@ -70,6 +71,39 @@ class ApplicationTests(unittest.TestCase):
         config['backend_image'] = 'docker.io/noctua/backend:latest'
         with self.assertRaisesRegex(ValueError, 'sha256'):
             application.validate_config(config, images=True)
+
+    def test_alternate_frontend_requires_distinct_digest(self):
+        config = configuration()
+        for value in [None, [], 'docker.io/noctua/frontend:latest', config['frontend_image']]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                application.validate_config({**config, 'frontend_image_b': value}, images=True)
+        application.validate_config({**config, 'frontend_image_b': 'docker.io/noctua/frontend@sha256:' + 'c' * 64}, images=True)
+
+    def test_publication_stops_before_push_when_frontend_verification_fails(self):
+        commands = []
+        def command(*args):
+            commands.append(args)
+            if any('check_frontend_image.py' in value for value in args):
+                raise RuntimeError('frontend check failed')
+        with patch.object(sys, 'argv', ['publish_images.py', '--namespace', 'noctua', '--release', 'test', '--frontend-variants']), \
+                patch.object(publish_images, 'command', side_effect=command):
+            with self.assertRaisesRegex(RuntimeError, 'frontend check failed'):
+                publish_images.main()
+        self.assertFalse(any(args[:2] == ('docker', 'push') for args in commands))
+
+    def test_publication_outputs_alternate_config_key(self):
+        def metadata(args, **kwargs):
+            repository = args[-1].split(':')[0]
+            digest = ('c' if args[-1].endswith('-b') else 'b') * 64
+            return json.dumps([{'RepoDigests': [repository + '@sha256:' + digest]}])
+        with patch.object(sys, 'argv', ['publish_images.py', '--namespace', 'noctua', '--release', 'test', '--frontend-variants']), \
+                patch.object(publish_images, 'command'), \
+                patch.object(publish_images.subprocess, 'check_output', side_effect=metadata), \
+                patch('sys.stdout', new_callable=io.StringIO) as output:
+            publish_images.main()
+        references = json.loads(output.getvalue().split(':\n', 1)[1])
+        self.assertEqual(set(references), {'backend_image', 'frontend_image', 'frontend_image_b'})
+        self.assertNotEqual(references['frontend_image'], references['frontend_image_b'])
 
     def test_role_secrets_not_embedded_in_remote_package(self):
         config = configuration()
@@ -213,6 +247,41 @@ class ApplicationTests(unittest.TestCase):
                 patch.object(remote, 'run', return_value=Mock(stdout='text/html')):
             with self.assertRaisesRegex(RuntimeError, 'invalid MIME'):
                 remote.smoke(configuration(), 'frontend')
+
+    def test_variants_are_stable_and_all_assets_precede_html(self):
+        config = {**configuration(), 'frontend_image_b': 'docker.io/noctua/frontend@sha256:' + 'c' * 64}
+        out = {'DatabaseInstanceId': 'i-db', 'BackendInstanceId': 'i-api', 'FrontendInstanceIds': 'i-web3,i-web1,i-web2'}
+        with patch.object(application, 'deployment_context', return_value=(config, out)), \
+                patch.object(application, 'package_sources', return_value=b'package'):
+            request = application.deployment_request(config, Path('schema.sql'))
+        steps = request['steps'][2:]
+        self.assertEqual([step['component'] for step in steps], ['frontend-assets'] * 3 + ['frontend'] * 3)
+        for index, step in enumerate(steps):
+            context = json.loads(base64.b64decode(step['commands'][7].split("'")[3]))
+            self.assertEqual(step['instanceId'], f'i-web{index % 3 + 1}')
+            self.assertEqual(context['frontend_asset_images'], [config['frontend_image'], config['frontend_image_b']])
+            self.assertEqual(context['frontend_image'], config['frontend_image_b'] if index % 3 == 1 else config['frontend_image'])
+        for ids in ['', 'i-web1', 'i-web1,i-web1']:
+            with self.subTest(ids=ids), self.assertRaises(ValueError):
+                application.frontend_targets(config, config, {**out, 'FrontendInstanceIds': ids})
+
+    def test_remote_stages_assets_from_both_variants_on_one_node(self):
+        config = {**configuration(), 'frontend_asset_images': [configuration()['frontend_image'],
+                  'docker.io/noctua/frontend@sha256:' + 'c' * 64]}
+        def run(*args, **kwargs):
+            if args[:2] == ('docker', 'create'):
+                return Mock(stdout='variant-b' if args[2].endswith('c' * 64) else 'variant-a')
+            if args[:2] == ('docker', 'cp'):
+                assets = Path(args[3]) / 'assets'
+                assets.mkdir()
+                (assets / (args[2].split(':')[0] + '.js')).write_text(args[2])
+            return Mock(stdout='')
+        with tempfile.TemporaryDirectory() as directory, patch.object(remote, 'ROOT', Path(directory)), \
+                patch.object(remote, 'run', side_effect=run), patch.object(remote, 'pull_image') as pull:
+            remote.prepare_frontend_assets(config)
+            self.assertEqual({path.name for path in (Path(directory) / 'frontend-assets').iterdir()},
+                             {'variant-a.js', 'variant-b.js'})
+        self.assertEqual({call.args[1] for call in pull.call_args_list}, set(config['frontend_asset_images']))
 
     def test_failed_deploy_restores_previous_image_and_still_fails(self):
         import tempfile
@@ -518,7 +587,7 @@ const helpers = {getBinaryDataBuffer: async (index) => Buffer.from(entries[index
         ready = self.ready_state()
         state = self.run_code('Build deployment request', ready)[0]['json']
         self.assertEqual(state['frontendUrl'], 'http://203.0.113.10')
-        self.assertEqual([step['component'] for step in state['steps']], ['database', 'backend', 'frontend'])
+        self.assertEqual([step['component'] for step in state['steps']], ['database', 'backend', 'frontend-assets', 'frontend'])
         commands = state['steps'][0]['commands']
         context = json.loads(base64.b64decode(commands[7].split("'")[3]))
         self.assertEqual(context['database_private_ip'], '10.0.3.10')
@@ -625,8 +694,8 @@ const helpers = {getBinaryDataBuffer: async (index) => Buffer.from(entries[index
         ready = self.asg_ready_state()
         state = self.run_code('Build deployment request', ready)[0]['json']
         self.assertEqual(state['frontendUrl'], 'http://noctua-alb.us-east-1.elb.amazonaws.com')
-        self.assertEqual([step['component'] for step in state['steps']], ['database', 'backend', 'frontend', 'frontend'])
-        self.assertEqual([step['instanceId'] for step in state['steps']], ready['instanceIds'])
+        self.assertEqual([step['component'] for step in state['steps']], ['database', 'backend', 'frontend-assets', 'frontend-assets', 'frontend', 'frontend'])
+        self.assertEqual([step['instanceId'] for step in state['steps']], ready['instanceIds'] + ready['frontendInstanceIds'])
         self.assertNotIn('frontendIp', state)
         del ready['frontendInstanceIds']
         self.assertIn('deployment instance IDs', self.run_code('Build deployment request', ready)['error'])
@@ -700,10 +769,38 @@ const helpers = {getBinaryDataBuffer: async (index) => Buffer.from(entries[index
         self.assertFalse(self.nodes['Send SSM command']['retryOnFail'])
 
     def test_three_component_deploy_preserves_results_across_polling_and_step_loops(self):
-        self.check_deployment_loop(self.ready_state(), ['database', 'backend', 'frontend'])
+        self.check_deployment_loop(self.ready_state(), ['database', 'backend', 'frontend-assets', 'frontend'])
 
     def test_asg_deploy_requires_success_for_both_frontend_instances(self):
-        self.check_deployment_loop(self.asg_ready_state(), ['database', 'backend', 'frontend', 'frontend'])
+        ready = self.asg_ready_state()
+        ready['config']['frontend_image_b'] = 'docker.io/noctua/frontend@sha256:' + 'c' * 64
+        self.check_deployment_loop(ready, ['database', 'backend', 'frontend-assets', 'frontend-assets', 'frontend', 'frontend'])
+
+    def test_workflow_alternate_image_validation_and_cli_assignment_parity(self):
+        config = configuration()
+        for value in [None, [], 'docker.io/noctua/frontend:latest', config['frontend_image']]:
+            files = self.input_files()
+            files['application.local.json'] = json.dumps({**config, 'frontend_image_b': value})
+            with self.subTest(value=value):
+                self.assertIn('error', self.run_code('Load deployment inputs', files=files))
+        config['frontend_image_b'] = 'docker.io/noctua/frontend@sha256:' + 'c' * 64
+        files = self.input_files()
+        files['application.local.json'] = json.dumps(config)
+        ready = self.asg_ready_state()
+        ready['config'] = self.run_code('Load deployment inputs', files=files)[0]['json']['config']
+        ready['frontendInstanceIds'].reverse()
+        out = {**ready['applicationOutputs'], 'FrontendInstanceIds': ','.join(ready['frontendInstanceIds'])}
+        with patch.object(application, 'deployment_context', return_value=(config, out)), \
+                patch.object(application, 'package_sources', return_value=b'package'):
+            cli = application.deployment_request(config, Path('schema.sql'))
+        workflow = self.run_code('Build deployment request', ready)[0]['json']
+        for expected, actual in zip(cli['steps'][2:], workflow['steps'][2:], strict=True):
+            self.assertEqual((expected['component'], expected['instanceId']), (actual['component'], actual['instanceId']))
+            contexts = [json.loads(base64.b64decode(step['commands'][7].split("'")[3])) for step in [expected, actual]]
+            for key in ['frontend_image', 'frontend_asset_images']:
+                self.assertEqual(contexts[0][key], contexts[1][key])
+        ready['frontendInstanceIds'].pop()
+        self.assertIn('at least two', self.run_code('Build deployment request', ready)['error'])
 
     def check_deployment_loop(self, ready, components):
         context = self.run_code('Build deployment request', ready)[0]['json']
@@ -739,7 +836,7 @@ const helpers = {getBinaryDataBuffer: async (index) => Buffer.from(entries[index
             self.assertEqual(item['standardOutput'], item['component'] + ' validated')
             self.assertEqual(item['pollCount'], 3)
         # A duplicated success from another frontend cannot complete the deployment.
-        context['results'][-1]['instanceId'] = context['results'][-2]['instanceId']
+        context['results'][-1]['instanceId'] = 'i-wrong-instance'
         self.assertIn('incomplete', self.run_code('Deployment result', context)['error'])
 
 

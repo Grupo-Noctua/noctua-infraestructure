@@ -71,6 +71,11 @@ def validate_config(config, images=False):
         for key in ['backend_image', 'frontend_image']:
             if not re.fullmatch(IMAGE_PATTERN, config[key]):
                 raise ValueError(f'{key} must be a docker.io image pinned by sha256 digest')
+        alternate = config.get('frontend_image_b', '')
+        if not isinstance(alternate, str) or (alternate and not re.fullmatch(IMAGE_PATTERN, alternate)):
+            raise ValueError('frontend_image_b must be empty or a Docker Hub sha256 digest')
+        if alternate == config['frontend_image']:
+            raise ValueError('frontend_image_b must differ from frontend_image')
 
 
 def stack(config, name):
@@ -178,6 +183,38 @@ def wait_ssm(config, instance_ids):
     raise TimeoutError('Instances are not Online in SSM; inspect role, agent and NAT connectivity')
 
 
+def frontend_instances(config, out):
+    if 'FrontendInstanceIds' in out:
+        ids = [value.strip() for value in out['FrontendInstanceIds'].split(',') if value.strip()]
+    elif 'FrontendAutoScalingGroupName' in out:
+        groups = aws(config, 'autoscaling', 'describe-auto-scaling-groups', {
+            'AutoScalingGroupNames': [out['FrontendAutoScalingGroupName']]})['AutoScalingGroups']
+        if len(groups) != 1:
+            raise ValueError('Frontend Auto Scaling Group is missing')
+        group = groups[0]
+        instances = group.get('Instances', [])
+        if len(instances) < int(group['DesiredCapacity']) or any(
+                item['LifecycleState'] != 'InService' or item['HealthStatus'] != 'Healthy' for item in instances):
+            raise ValueError('Wait for all frontend ASG instances to be InService and Healthy')
+        ids = [item['InstanceId'] for item in instances]
+    else:
+        ids = [out['FrontendInstanceId']] if out.get('FrontendInstanceId') else []
+    if not ids or len(set(ids)) != len(ids) or set(ids) & {out.get('DatabaseInstanceId'), out.get('BackendInstanceId')}:
+        raise ValueError('Missing or duplicate frontend instance IDs')
+    if config.get('frontend_image_b') and len(ids) < 2:
+        raise ValueError('frontend_image_b requires at least two frontend instances')
+    return sorted(ids)
+
+
+def frontend_targets(config, remote, out):
+    images = [config['frontend_image']]
+    if config.get('frontend_image_b'):
+        images.append(config['frontend_image_b'])
+    return [(fid, {**remote, 'frontend_image': images[index % len(images)],
+                   'frontend_asset_images': images})
+            for index, fid in enumerate(frontend_instances(config, out))]
+
+
 def deployment_context(config):
     validate_config(config, images=True)
     data = stack(config, config['stack_name'])
@@ -196,22 +233,9 @@ def deployment_context(config):
     })
     if config['athena_enabled'] and not remote['athena_database']:
         raise ValueError('Glue database output is missing from compute stack')
-    # Determine frontend instance ids:
-    frontend_ids = []
-    # If template exposes FrontendInstanceIds (CSV), use them
-    if 'FrontendInstanceIds' in out:
-        frontend_ids = [x for x in out['FrontendInstanceIds'].split(',') if x]
-    # If template exposes an AutoScalingGroup name, query ASG for instances
-    elif 'FrontendAutoScalingGroupName' in out:
-        asg_name = out['FrontendAutoScalingGroupName']
-        resp = aws(config, 'autoscaling', 'describe-auto-scaling-groups', {'AutoScalingGroupNames': [asg_name]})
-        groups = resp.get('AutoScalingGroups', [])
-        if groups:
-            frontend_ids = [inst['InstanceId'] for inst in groups[0].get('Instances', [])]
-    # Fallback to single FrontendInstanceId if present
-    elif 'FrontendInstanceId' in out:
-        frontend_ids = [out['FrontendInstanceId']]
-
+    frontend_ids = frontend_instances(config, out)
+    # Freeze the discovered fleet for all steps of this deployment.
+    out['FrontendInstanceIds'] = ','.join(frontend_ids)
     wait_ssm(config, [out[key] for key in ['DatabaseInstanceId', 'BackendInstanceId']] + frontend_ids)
     return remote, out
 
@@ -248,26 +272,14 @@ def deployment_request(config, schema_path):
     # database and backend single-instance steps
     for component, key in [('database', 'DatabaseInstanceId'), ('backend', 'BackendInstanceId')]:
         steps.append({'component': component, 'instanceId': out[key], 'commands': remote_commands(component, remote, package)})
-    # frontend: may be multiple instances
-    # Resolve frontend instance ids similarly to deployment_context
-    frontend_ids = []
-    if 'FrontendInstanceIds' in out:
-        frontend_ids = [x for x in out['FrontendInstanceIds'].split(',') if x]
-    elif 'FrontendAutoScalingGroupName' in out:
-        asg_name = out['FrontendAutoScalingGroupName']
-        resp = aws(config, 'autoscaling', 'describe-auto-scaling-groups', {'AutoScalingGroupNames': [asg_name]})
-        groups = resp.get('AutoScalingGroups', [])
-        if groups:
-            frontend_ids = [inst['InstanceId'] for inst in groups[0].get('Instances', [])]
-    elif 'FrontendInstanceId' in out:
-        frontend_ids = [out['FrontendInstanceId']]
-
+    targets = frontend_targets(config, remote, out)
     # Every frontend must have the new assets before any node serves the new HTML.
-    for fid in frontend_ids:
+    for fid, node_config in targets:
         steps.append({'component': 'frontend-assets', 'instanceId': fid,
-                      'commands': remote_commands('frontend-assets', remote, package)})
-    for fid in frontend_ids:
-        steps.append({'component': 'frontend', 'instanceId': fid, 'commands': remote_commands('frontend', remote, package)})
+                      'commands': remote_commands('frontend-assets', node_config, package)})
+    for fid, node_config in targets:
+        steps.append({'component': 'frontend', 'instanceId': fid, 'image': node_config['frontend_image'],
+                      'commands': remote_commands('frontend', node_config, package)})
     return {'region': config['region'], 'stackName': config['stack_name'],
             'generatedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
             'frontendIp': out.get('FrontendPublicIp', out.get('FrontendLoadBalancerDnsName', '')),
@@ -305,10 +317,13 @@ def retire_database_plan(config):
     # Require the new application infrastructure and a completed deployment before retiring the old EC2.
     remote, out = deployment_context(config)
     package = package_sources(DEFAULT_SCHEMA)
-    for component, key in [('backend', 'BackendInstanceId'), ('frontend', 'FrontendInstanceId')]:
-        send_and_wait(config, {'component': 'verify-' + component, 'instanceId': out[key],
-                              'commands': remote_commands('verify-' + component, remote, package)})
-    print('New application validated before planning legacy removal. Frontend:', out['FrontendPublicIp'])
+    targets = [('backend', out['BackendInstanceId'], remote)] + [
+        ('frontend', fid, node_config) for fid, node_config in frontend_targets(config, remote, out)]
+    for component, fid, node_config in targets:
+        send_and_wait(config, {'component': 'verify-' + component, 'instanceId': fid,
+                              'commands': remote_commands('verify-' + component, node_config, package)})
+    print('New application validated before planning legacy removal. Frontend:',
+          out.get('FrontendLoadBalancerDnsName', out.get('FrontendPublicIp', '')))
     name = config['compute_stack_name']
     current = stack(config, name)
     response = aws(config, 'cloudformation', 'get-template', {'StackName': name, 'TemplateStage': 'Original'})

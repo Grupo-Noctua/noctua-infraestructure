@@ -32,7 +32,7 @@ def docker(*args):
     return subprocess.check_output(['docker', *args], text=True).strip()
 
 
-def verify(image):
+def verify(image, variant=None):
     suffix = uuid.uuid4().hex[:10]
     network, backend, frontend = [f'noctua-check-{part}-{suffix}' for part in ['net', 'api', 'web']]
     created = []
@@ -73,6 +73,11 @@ def verify(image):
                 time.sleep(1)
         html = get('/').decode()
         assert '<html' in html.lower()
+        if variant:
+            assert html.count('id="noctua-frontend-variant"') == 1
+            assert f'FRONTEND {variant}' in html
+            assert ('#1d4ed8' if variant == 'A' else '#c2410c') in html
+            assert html.index('id="noctua-frontend-variant"') < html.index('</body>')
         for path in ['/', '/index.html', '/projects/deep-link']:
             with urllib.request.urlopen(base + path, timeout=15) as response:
                 assert response.headers.get('Cache-Control') == 'no-store'
@@ -115,4 +120,6 @@ def verify(image):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('image')
-    verify(parser.parse_args().image)
+    parser.add_argument('--variant', choices=['A', 'B'])
+    args = parser.parse_args()
+    verify(args.image, args.variant)

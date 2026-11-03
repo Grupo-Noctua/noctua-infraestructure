@@ -103,6 +103,8 @@ O arquivo local é ignorado pelo Git. Preencha:
 - `frontend_ingress_cidr`: seu IP público `/32` para a validação inicial por HTTP.
 - `instance_profile` e os tipos de instância permitidos.
 - `backend_image` e `frontend_image`: digests publicados na próxima seção.
+- `frontend_image_b`: opcional, digest da segunda variante visual; vazio usa uma
+  única imagem. Veja [frontends A/B no load balancer](FRONTENDS_LOAD_BALANCER.md).
 - `compute_stack_name`: stack existente com outputs `GlueDatabaseName` e `AthenaWorkGroupName`.
 - `athena_enabled`: `true` para exigir também a validação real de Athena. Se usar
   `false` para validar primeiro o MySQL, a saída informa Athena não validado e os
@@ -130,6 +132,10 @@ O script constrói ambas as imagens para `linux/amd64`, executa os testes do Doc
 do backend e o verificador de empacotamento, publica as imagens e imprime referências
 `docker.io/usuario/imagem@sha256:...`. Copie as referências para a configuração local.
 Não reutilize a tag de uma release; o deploy exige digest, não `latest`.
+
+Para gerar dois frontends visualmente diferentes, acrescente `--frontend-variants`.
+O script produz A (azul) e B (laranja) a partir do mesmo build, testa ambos e imprime
+também `frontend_image_b`. O sinalizador `--build-only` permite apenas construir/testar.
 
 Imagens públicas podem ser baixadas anonimamente, sujeitas aos limites do Docker Hub.
 Para imagens privadas (ou pull autenticado), crie pelo console SSM um `SecureString`
@@ -196,7 +202,8 @@ Ordem efetivamente executada:
 3. Enviar pacote de scripts/schema por SSM, com checksum e diretório temporário.
 4. Preparar o banco, seu usuário e executar backup inicial.
 5. Implantar e validar o backend.
-6. Implantar e validar frontend e proxy.
+6. Preparar os assets de todas as imagens frontend em todas as instâncias.
+7. Implantar e validar cada frontend e proxy, alternando A/B quando configurado.
 
 O pacote enviado não contém credenciais AWS nem valores dos segredos. A mesma role
 disponível no laboratório é usada pelas EC2s; isso não implementa roles mínimas por
@@ -330,7 +337,8 @@ aguarda as EC2s e implanta banco → backend → frontend. Não exige `prepare`,
 6. Consulta os outputs atuais e usa `FrontendAutoScalingGroupName` para descobrir os
    frontends via `DescribeAutoScalingGroups`. Aguarda a capacidade desejada em
    `InService`/`Healthy` e todas as EC2s `Online` no SSM, até 20 minutos no total.
-7. Monta os comandos com os IDs/IPs atuais e implanta banco → backend → cada frontend.
+7. Monta os comandos com os IDs/IPs atuais e implanta banco → backend → assets em todos
+   os frontends → cada frontend. `frontend_image_b` alterna as imagens por ID ordenado.
    O script remoto também aguarda `/opt/noctua/bootstrap-ready` antes de implantar.
 
 O workflow espera 10 segundos **entre consultas**, não como critério de sucesso.
@@ -341,7 +349,7 @@ a execução. O envio SSM e a criação/execução do change set não são repet
 após respostas ambíguas: confira o histórico AWS antes de reiniciar.
 
 O nó **Deployment result** retorna `DEPLOY_VALIDATED` somente após validar todas as
-instâncias (quatro etapas para banco, backend e dois frontends). A saída inclui stack,
+instâncias (seis etapas para banco, backend, assets e deploy dos dois frontends). A saída inclui stack,
 região, `frontendUrl` com o DNS do ALB em HTTP (ou domínio configurado em HTTPS), duração, `athenaValidated`,
 `infrastructure.action` (`CREATE`, `UPDATE` ou `UNCHANGED`) e `components`, com os IDs
 das instâncias/comandos, estados e saídas SSM. Os digests aparecem na saída remota.

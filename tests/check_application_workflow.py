@@ -127,7 +127,7 @@ return [{json: {statusCode: 200, body: {CommandId: $json.commandId,
         'type': 'n8n-nodes-base.code', 'typeVersion': 2, 'position': [2400, 820],
         'parameters': {'jsCode': 'const action = ' + json.dumps(args.scenario.upper()) + """;
 if ($json.status !== 'DEPLOY_VALIDATED' || $json.infrastructure.action !== action ||
-    $json.frontendUrl !== 'http://noctua-alb.us-east-1.elb.amazonaws.com' || $json.components.length !== 4 ||
+    $json.frontendUrl !== 'http://noctua-alb.us-east-1.elb.amazonaws.com' || $json.components.length !== 6 ||
     new Set($json.components.map(item => item.instanceId)).size !== 4 ||
     $json.components.some(item => item.pollCount !== 2 || item.status !== 'Success')) {
   throw new Error('Offline workflow result is incorrect');
@@ -144,6 +144,10 @@ return [{json: {smokeCheck: 'PASSED', components: $json.components.map(item => i
                  'remote_application.py': root / 'scripts/remote_application.py',
                  'script-noctua.sql': root / 'database/script-noctua.sql'}
         for name, content in fixture.input_files().items():
+            if name == 'application.local.json':
+                config = json.loads(content)
+                config['frontend_image_b'] = 'docker.io/noctua/frontend@sha256:' + 'c' * 64
+                content = json.dumps(config)
             paths[name].parent.mkdir(parents=True, exist_ok=True)
             paths[name].write_text(content, encoding='utf-8')
         (root / 'workflow.json').write_text(json.dumps(workflow), encoding='utf-8')
